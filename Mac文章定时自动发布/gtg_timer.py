@@ -898,6 +898,28 @@ end tell
         log(f"  未找到目标选项: {targets}")
         return False
 
+    # 等弹窗里的三个下拉真正渲染出来（cliclick点击到弹窗加载完成有延迟）
+    popup_ready = False
+    for _ in range(20):
+        v_cnt = js(wsc, """
+        (function(){
+            return document.querySelectorAll('[class*="arco-select-view-value"],[class*="arco-select-view-input"]').length;
+        })()
+        """, 158)
+        if v_cnt and int(v_cnt) >= 3:
+            popup_ready = True; break
+        time.sleep(0.5)
+    if not popup_ready:
+        log("  弹窗没完全渲染，重新点定时发布按钮")
+        subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of process "创作罐头" to true'], capture_output=True)
+        time.sleep(0.3)
+        subprocess.run(["cliclick", f"c:{timer_btn_x},{timer_btn_y}"], capture_output=True)
+        time.sleep(3)
+        for _ in range(20):
+            v_cnt = js(wsc, """(function(){return document.querySelectorAll('[class*="arco-select-view"]').length;})()""", 159)
+            if v_cnt and int(v_cnt) >= 3: break
+            time.sleep(0.5)
+
     if not click_select_option(0, [t_date1, t_date2], 160):
         wsc.close()
         return False, f"定时日期设置失败: {t_date1}"
