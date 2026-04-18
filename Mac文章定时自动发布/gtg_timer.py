@@ -571,18 +571,34 @@ end tell
     result_holder = [None]
 
     def fill_dialog():
-        time.sleep(3.0)
+        # 循环等文件对话框真正弹起来（前台是罐头）而不是死等固定秒数
+        deadline = time.time() + 20
+        ready = False
+        while time.time() < deadline:
+            check = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to get name of first process whose frontmost is true'],
+                capture_output=True, text=True
+            )
+            if check.stdout.strip() in ("electron", "Electron", "创作罐头"):
+                ready = True
+                break
+            time.sleep(0.3)
+        if not ready:
+            result_holder[0] = False
+            return
+        time.sleep(0.8)  # 给对话框稳定一下
         subprocess.run(["pbcopy"], input=doc_escaped.encode("utf-8"))
-        subprocess.run(["osascript", "-e", f"""
+        subprocess.run(["osascript", "-e", """
 tell application "System Events"
-    keystroke "g" using {{command down, shift down}}
-    delay 2.0
-    keystroke "a" using {{command down}}
-    delay 0.5
-    keystroke "v" using {{command down}}
+    keystroke "g" using {command down, shift down}
     delay 1.5
+    keystroke "a" using {command down}
+    delay 0.3
+    keystroke "v" using {command down}
+    delay 1.2
     keystroke return
-    delay 3.0
+    delay 2.5
     keystroke return
 end tell
 """], capture_output=True)
