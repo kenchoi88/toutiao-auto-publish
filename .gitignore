@@ -24,3 +24,10 @@ logs/
 data/
 cookies/
 *.sqlite
+
+# Excel数据文件（含敏感统计，不入仓库）
+*.xlsx
+~$*
+
+# MCN数据：手动下载的历史快照
+MCN数据/4月*号/
