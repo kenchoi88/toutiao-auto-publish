@@ -735,9 +735,18 @@ end tell
     p_t = json.loads(v_timer)
     timer_btn_x = wv_cur['sx'] + p_t['x']
     timer_btn_y = wv_cur['sy'] + p_t['y']
+    # 先激活罐头窗口，确保点击能送到前台
+    subprocess.run(["osascript", "-e", """
+tell application "System Events"
+    tell process "创作罐头"
+        set frontmost to true
+    end tell
+end tell
+"""], capture_output=True)
+    time.sleep(0.5)
     log(f"  cliclick 点击定时发布 ({timer_btn_x},{timer_btn_y})")
     subprocess.run(["cliclick", f"c:{timer_btn_x},{timer_btn_y}"], capture_output=True)
-    time.sleep(1.5)
+    time.sleep(2.5)  # 等弹窗出现多给点时间
 
     # 等弹窗出现
     popup_ok = False
