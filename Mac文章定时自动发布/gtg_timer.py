@@ -744,9 +744,26 @@ tell application "System Events"
 end tell
 """], capture_output=True)
     time.sleep(0.5)
-    log(f"  cliclick 点击定时发布 ({timer_btn_x},{timer_btn_y})")
+    log(f"  cliclick 点击定时发布 ({timer_btn_x},{timer_btn_y})  webview({wv_cur['sx']},{wv_cur['sy']}) btn_in_wv({p_t['x']},{p_t['y']})")
     subprocess.run(["cliclick", f"c:{timer_btn_x},{timer_btn_y}"], capture_output=True)
-    time.sleep(2.5)  # 等弹窗出现多给点时间
+    time.sleep(2.5)
+    # 点击后立刻dump页面状态：看弹窗有没有出现
+    dump = js(wsc, """
+    (function(){
+        var r = {mask: null, arcoSelects: 0, allBtns: []};
+        var m = document.querySelector('[class*="arco-modal"],[class*="modal-mask"],[class*="popup"]');
+        if(m){ var rr = m.getBoundingClientRect(); r.mask = m.className.substring(0,60)+' '+rr.width+'x'+rr.height; }
+        r.arcoSelects = document.querySelectorAll('[class*="arco-select-view"]').length;
+        var btns = document.querySelectorAll('button');
+        for(var i=0;i<btns.length;i++){
+            var t = btns[i].textContent.trim();
+            var rr = btns[i].getBoundingClientRect();
+            if(t && rr.width > 0) r.allBtns.push(t);
+        }
+        return JSON.stringify(r);
+    })()
+    """, 155)
+    log(f"  点击后DOM: {dump}")
 
     # 等弹窗出现
     popup_ok = False
