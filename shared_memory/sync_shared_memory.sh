@@ -9,14 +9,18 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHARED_DIR="$REPO_DIR/shared_memory"
 
 # 检测本机 Claude memory 路径
-# Claude Code 把 cwd 路径里的 / 替换成 - 作为 project 目录名
+# 支持 -d <dir> 参数显式指定目标 memory 目录
+TARGET_DIR=""
+if [ "$1" = "-d" ] && [ -n "$2" ]; then
+    TARGET_DIR="$2"
+fi
+
 CWD_NORMALIZED=$(pwd | sed 's|/|-|g')
 PROJECTS_DIR="$HOME/.claude/projects"
 
-# 自动找当前 cwd 对应的 project 目录
-TARGET_DIR=""
-if [ -d "$PROJECTS_DIR" ]; then
-    # 优先按当前cwd匹配
+# 自动定位
+if [ -z "$TARGET_DIR" ] && [ -d "$PROJECTS_DIR" ]; then
+    # 1. 按当前cwd精确匹配
     for d in "$PROJECTS_DIR"/*; do
         [ -d "$d" ] || continue
         base=$(basename "$d")
@@ -25,16 +29,31 @@ if [ -d "$PROJECTS_DIR" ]; then
             break
         fi
     done
-    # 如果没匹配上 cwd，找带 "code" 或 "头条" 的最近修改的 project
+
+    # 2. 找已有 memory/ 子目录的 project，按最近修改取第一个
     if [ -z "$TARGET_DIR" ]; then
-        TARGET_DIR=$(ls -td "$PROJECTS_DIR"/*code* 2>/dev/null | head -1)
-        [ -n "$TARGET_DIR" ] && TARGET_DIR="$TARGET_DIR/memory"
+        for d in $(ls -td "$PROJECTS_DIR"/*/ 2>/dev/null); do
+            if [ -d "$d/memory" ]; then
+                TARGET_DIR="$d/memory"
+                echo "提示: 用 fallback 定位到已有 memory 目录: $TARGET_DIR"
+                break
+            fi
+        done
+    fi
+
+    # 3. 都找不到：最近活跃的 project 下建一个 memory/
+    if [ -z "$TARGET_DIR" ]; then
+        d=$(ls -td "$PROJECTS_DIR"/*/ 2>/dev/null | head -1)
+        if [ -n "$d" ]; then
+            TARGET_DIR="${d%/}/memory"
+            echo "提示: 在最近 project 下新建 memory: $TARGET_DIR"
+        fi
     fi
 fi
 
 if [ -z "$TARGET_DIR" ]; then
-    echo "错误：找不到本机 Claude memory 目录（~/.claude/projects/...）"
-    echo "请先用 Claude Code 在当前仓库目录开过至少一次会话"
+    echo "错误: 找不到本机 Claude project 目录（~/.claude/projects/ 下任何子目录）"
+    echo "请先用 Claude Code 至少跑一次会话，或用 -d <memory目录> 显式指定"
     exit 1
 fi
 
