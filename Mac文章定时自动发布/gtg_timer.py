@@ -596,51 +596,94 @@ end tell
     screen_y = wv_t['sy'] + sb['by']
 
     doc_escaped = doc_path.replace("\\", "/")
+    # AppleScript 字符串里的反斜杠和双引号要转义（路径里通常没有，但保险）
+    safe_path = doc_escaped.replace("\\", "\\\\").replace('"', '\\"')
     result_holder = [None]
 
+    def sheet_exists():
+        r = subprocess.run([
+            "osascript", "-e",
+            'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of window 1)'
+        ], capture_output=True, text=True)
+        return 'true' in r.stdout.lower()
+
+    def press_esc(times=2):
+        """对话框卡住时主动 ESC 关掉，避免堵塞后续操作"""
+        for _ in range(times):
+            subprocess.run(["osascript", "-e", '''
+tell application "System Events"
+    tell process "创作罐头"
+        key code 53
+    end tell
+end tell
+'''], capture_output=True)
+            time.sleep(0.4)
+
     def fill_dialog():
-        # 精确等文件对话框sheet出现（不只靠frontmost是罐头）
+        # 等文件对话框 sheet 出现
         deadline = time.time() + 15
+        appeared = False
         while time.time() < deadline:
-            r = subprocess.run([
-                "osascript", "-e",
-                'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of window 1)'
-            ], capture_output=True, text=True)
-            if 'true' in r.stdout.lower():
+            if sheet_exists():
+                appeared = True
                 break
             time.sleep(0.3)
-        else:
+        if not appeared:
             result_holder[0] = False
             return
         time.sleep(0.6)
-        subprocess.run(["pbcopy"], input=doc_escaped.encode("utf-8"))
-        subprocess.run(["osascript", "-e", """
+        # set the clipboard 内联，避免 pbcopy 时序问题
+        subprocess.run(["osascript", "-e", f'''
+set the clipboard to "{safe_path}"
+delay 0.3
 tell application "System Events"
-    keystroke "g" using {command down, shift down}
+    keystroke "g" using {{command down, shift down}}
+    delay 1.5
+    keystroke "a" using {{command down}}
+    delay 0.4
+    keystroke "v" using {{command down}}
     delay 1.2
-    keystroke "a" using {command down}
-    delay 0.3
-    keystroke "v" using {command down}
-    delay 1.0
     keystroke return
-    delay 2.0
+    delay 2.5
     keystroke return
 end tell
-"""], capture_output=True)
-        result_holder[0] = True
+'''], capture_output=True)
+        # 等对话框消失（说明文件真的被打开了）；超时 = hang 住
+        for _ in range(20):  # 最多 10 秒
+            time.sleep(0.5)
+            if not sheet_exists():
+                result_holder[0] = True
+                return
+        # hang 了：ESC 关掉，标记失败让外层重试
+        log("  文件对话框 hang 住，ESC 取消后重试")
+        press_esc(2)
+        result_holder[0] = False
 
-    t = threading.Thread(target=fill_dialog, daemon=True)
-    t.start()
-    time.sleep(0.2)
-    ensure_gtg_top()
-    subprocess.run(["cliclick", f"m:{screen_x},{screen_y}"], capture_output=True)
-    time.sleep(0.2)
-    subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
-    t.join(timeout=25)
+    # 重试最多 3 次，扛住偶发对话框 hang
+    dialog_ok = False
+    for dialog_attempt in range(3):
+        result_holder[0] = None
+        t = threading.Thread(target=fill_dialog, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        ensure_gtg_top()
+        subprocess.run(["cliclick", f"m:{screen_x},{screen_y}"], capture_output=True)
+        time.sleep(0.2)
+        subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
+        t.join(timeout=30)
+        if result_holder[0]:
+            dialog_ok = True
+            if dialog_attempt > 0:
+                log(f"  文件对话框第{dialog_attempt+1}次成功")
+            break
+        # 失败前再保险按一次 ESC 确保对话框关闭，否则下次循环点"选择文档"会被堵
+        press_esc(2)
+        time.sleep(1)
+        log(f"  第{dialog_attempt+1}次对话框处理失败，准备重试")
 
-    if not result_holder[0]:
+    if not dialog_ok:
         wsc.close()
-        return False, "文件对话框未弹出或处理失败"
+        return False, "文件对话框反复卡住，3次重试均失败"
 
     time.sleep(5)
     char_count = 0
