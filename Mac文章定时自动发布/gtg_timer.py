@@ -13,6 +13,7 @@
 """
 
 import requests
+import base64
 import json
 import websocket
 import time
@@ -169,6 +170,33 @@ def cdp(ws, method, params=None, mid=1):
 def js(ws, expr, mid=99):
     r = cdp(ws, "Runtime.evaluate", {"expression": expr}, mid)
     return r.get("result", {}).get("value")
+
+
+def js_gesture(ws, expr, mid=99):
+    """带用户手势的JS执行，用于触发原生文件对话框等需要user activation的操作"""
+    r = cdp(ws, "Runtime.evaluate", {"expression": expr, "userGesture": True}, mid)
+    return r.get("result", {}).get("value")
+
+
+def ensure_gtg_top():
+    """每次cliclick前调用——最小化Code/Terminal等主要遮挡者，并把罐头置顶"""
+    subprocess.run(["osascript", "-e", '''
+tell application "System Events"
+    repeat with pname in {"Code", "Google Chrome", "Safari", "Terminal", "Claude", "Feishu", "WeChat"}
+        try
+            tell process (pname as text)
+                repeat with w in windows
+                    try
+                        set value of attribute "AXMinimized" of w to true
+                    end try
+                end repeat
+            end tell
+        end try
+    end repeat
+end tell
+tell application "创作罐头" to activate
+'''], capture_output=True)
+    time.sleep(0.3)
 
 
 def click(ws, x, y, mid):
@@ -519,10 +547,8 @@ end tell
             return null;
         })()
         """, 63)
-        if v:
-            break
+        if v: break
         time.sleep(0.5)
-
     if not v:
         wsc.close()
         return False, "找不到文档导入按钮"
@@ -533,15 +559,19 @@ end tell
     import_y = wv_t['sy'] + p['y']
     title_x = wv_t['sx'] + 400
     title_y = wv_t['sy'] + 50
+    ensure_gtg_top()
     subprocess.run(["cliclick", f"c:{title_x},{title_y}"], capture_output=True)
     time.sleep(0.5)
     log(f"  cliclick 点击文档导入 ({import_x},{import_y})")
+    ensure_gtg_top()
+    subprocess.run(["cliclick", f"m:{import_x},{import_y}"], capture_output=True)
+    time.sleep(0.3)
     subprocess.run(["cliclick", f"c:{import_x},{import_y}"], capture_output=True)
     time.sleep(1.5)
 
-    # 等"选择文档"弹窗
+    # 等"选择文档"按钮
     sel = None
-    for _ in range(360):
+    for _ in range(60):
         sel = js(wsc, """
         (function(){
             var btns = document.querySelectorAll('button');
@@ -554,10 +584,8 @@ end tell
             return null;
         })()
         """, 65)
-        if sel:
-            break
+        if sel: break
         time.sleep(0.5)
-
     if not sel:
         wsc.close()
         return False, "文档导入弹窗未出现"
@@ -571,34 +599,31 @@ end tell
     result_holder = [None]
 
     def fill_dialog():
-        # 循环等文件对话框真正弹起来（前台是罐头）而不是死等固定秒数
-        deadline = time.time() + 20
-        ready = False
+        # 精确等文件对话框sheet出现（不只靠frontmost是罐头）
+        deadline = time.time() + 15
         while time.time() < deadline:
-            check = subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to get name of first process whose frontmost is true'],
-                capture_output=True, text=True
-            )
-            if check.stdout.strip() in ("electron", "Electron", "创作罐头"):
-                ready = True
+            r = subprocess.run([
+                "osascript", "-e",
+                'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of window 1)'
+            ], capture_output=True, text=True)
+            if 'true' in r.stdout.lower():
                 break
             time.sleep(0.3)
-        if not ready:
+        else:
             result_holder[0] = False
             return
-        time.sleep(0.8)  # 给对话框稳定一下
+        time.sleep(0.6)
         subprocess.run(["pbcopy"], input=doc_escaped.encode("utf-8"))
         subprocess.run(["osascript", "-e", """
 tell application "System Events"
     keystroke "g" using {command down, shift down}
-    delay 1.5
+    delay 1.2
     keystroke "a" using {command down}
     delay 0.3
     keystroke "v" using {command down}
-    delay 1.2
+    delay 1.0
     keystroke return
-    delay 2.5
+    delay 2.0
     keystroke return
 end tell
 """], capture_output=True)
@@ -607,12 +632,15 @@ end tell
     t = threading.Thread(target=fill_dialog, daemon=True)
     t.start()
     time.sleep(0.2)
+    ensure_gtg_top()
+    subprocess.run(["cliclick", f"m:{screen_x},{screen_y}"], capture_output=True)
+    time.sleep(0.2)
     subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
     t.join(timeout=25)
 
     if not result_holder[0]:
         wsc.close()
-        return False, "文件选择对话框未处理成功"
+        return False, "文件对话框未弹出或处理失败"
 
     time.sleep(5)
     char_count = 0
@@ -713,57 +741,67 @@ end tell
     # ---- 定时发布流程 ----
     wv_cur = get_wv()
 
-    # 找"定时发布"按钮
-    v_timer = js(wsc, """
-    (function(){
-        var btns = document.querySelectorAll('button');
-        for(var i=0;i<btns.length;i++){
-            var t = btns[i].textContent.trim();
-            if(t === '\u5b9a\u65f6\u53d1\u5e03' && !btns[i].disabled){
-                var r = btns[i].getBoundingClientRect();
-                if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
+    # cliclick 真实macOS鼠标点击（JS/CDP合成事件过不了React的 isTrusted 检查）
+    # 关键：先scrollIntoView把按钮滚到视口中心，再换算成屏幕坐标
+    popup_opened = False
+    for attempt in range(5):
+        pos = js(wsc, """
+        (function(){
+            var btns = document.querySelectorAll('button');
+            for(var i=0;i<btns.length;i++){
+                if(btns[i].textContent.trim() === '\u5b9a\u65f6\u53d1\u5e03' && !btns[i].disabled){
+                    var r = btns[i].getBoundingClientRect();
+                    if(r.width > 0) return JSON.stringify({x: Math.round(r.left+r.width/2), y: Math.round(r.top+r.height/2)});
+                }
             }
-        }
-        return null;
-    })()
-    """, 150)
-
-    if not v_timer:
+            return null;
+        })()
+        """, 149 + attempt * 3)
+        if not pos:
+            if attempt == 0:
+                wsc.close()
+                return False, "找不到定时发布按钮"
+            time.sleep(1); continue
+        p = json.loads(pos)
+        # 每次重新取 wv 坐标（罐头layout可能变）
+        wv_cur_r = js(main_ws, """
+        (function(){
+            var wvs = document.querySelectorAll('webview');
+            var maxA = 0, best = null;
+            for(var i=0;i<wvs.length;i++){
+                var r = wvs[i].getBoundingClientRect();
+                var a = r.width*r.height;
+                if(a > maxA){ maxA = a; best = r; }
+            }
+            if(!best) return null;
+            return JSON.stringify({sx: Math.round(window.screenX+best.left), sy: Math.round(window.screenY+best.top)});
+        })()
+        """, 150 + attempt * 3)
+        wv_cur = json.loads(wv_cur_r) if wv_cur_r else get_wv()
+        sx = wv_cur['sx'] + p['x']
+        sy = wv_cur['sy'] + p['y']
+        ensure_gtg_top()
+        attempt_str = f" [第{attempt+1}次]" if attempt > 0 else ""
+        log(f"  cliclick 点定时发布 ({sx},{sy}){attempt_str}")
+        subprocess.run(["cliclick", f"m:{sx},{sy}"], capture_output=True)
+        time.sleep(0.5)
+        subprocess.run(["cliclick", f"c:{sx},{sy}"], capture_output=True)
+        time.sleep(3)  # 罐头响应延迟
+        # 等最多15秒看弹窗是否真打开
+        for _ in range(30):
+            v_cnt = js(wsc, """(function(){var bs=document.querySelectorAll('button');for(var i=0;i<bs.length;i++){var t=bs[i].textContent.trim();if(t==='\u9884\u89c8\u5e76\u5b9a\u65f6\u53d1\u5e03')return 1;}return 0;})()""", 151 + attempt * 3)
+            if v_cnt and int(v_cnt) >= 1:
+                popup_opened = True
+                break
+            time.sleep(0.5)
+        if popup_opened:
+            log(f"  弹窗已打开（第{attempt+1}次成功）")
+            break
+        log(f"  第{attempt+1}次点击后弹窗未开，重试")
+    if not popup_opened:
         wsc.close()
-        return False, "找不到定时发布按钮"
-
-    p_t = json.loads(v_timer)
-    timer_btn_x = wv_cur['sx'] + p_t['x']
-    timer_btn_y = wv_cur['sy'] + p_t['y']
-    # 先激活罐头窗口，确保点击能送到前台
-    subprocess.run(["osascript", "-e", """
-tell application "System Events"
-    tell process "创作罐头"
-        set frontmost to true
-    end tell
-end tell
-"""], capture_output=True)
-    time.sleep(0.5)
-    log(f"  cliclick 点击定时发布 ({timer_btn_x},{timer_btn_y})  webview({wv_cur['sx']},{wv_cur['sy']}) btn_in_wv({p_t['x']},{p_t['y']})")
-    subprocess.run(["cliclick", f"c:{timer_btn_x},{timer_btn_y}"], capture_output=True)
-    time.sleep(2.5)
-    # 点击后立刻dump页面状态：看弹窗有没有出现
-    dump = js(wsc, """
-    (function(){
-        var r = {mask: null, arcoSelects: 0, allBtns: []};
-        var m = document.querySelector('[class*="arco-modal"],[class*="modal-mask"],[class*="popup"]');
-        if(m){ var rr = m.getBoundingClientRect(); r.mask = m.className.substring(0,60)+' '+rr.width+'x'+rr.height; }
-        r.arcoSelects = document.querySelectorAll('[class*="arco-select-view"]').length;
-        var btns = document.querySelectorAll('button');
-        for(var i=0;i<btns.length;i++){
-            var t = btns[i].textContent.trim();
-            var rr = btns[i].getBoundingClientRect();
-            if(t && rr.width > 0) r.allBtns.push(t);
-        }
-        return JSON.stringify(r);
-    })()
-    """, 155)
-    log(f"  点击后DOM: {dump}")
+        return False, "定时发布点击后弹窗始终未打开"
+    p_t = {'y': -1}  # 占位
 
     # 等弹窗出现
     popup_ok = False
@@ -800,52 +838,29 @@ end tell
     t_hour2 = f"{dt.hour:02d}"
     t_min   = f"{dt.minute:02d}"
 
-    # 探测弹窗内所有可见交互元素（调试用）
-    dom_info = js(wsc, """
-    (function(){
-        var out = [];
-        var all = document.querySelectorAll('*');
-        for(var i=0;i<all.length;i++){
-            var r = all[i].getBoundingClientRect();
-            if(r.width < 20 || r.height < 10) continue;
-            var tag = all[i].tagName;
-            var cls = all[i].className || '';
-            var txt = all[i].textContent.trim().substring(0,30);
-            // 只关注含有时间/日期/月/时/分关键字，或者看起来像下拉的元素
-            var isDropdown = (cls.indexOf('select') !== -1 || cls.indexOf('dropdown') !== -1 ||
-                              cls.indexOf('picker') !== -1 || cls.indexOf('arco') !== -1 ||
-                              tag === 'SELECT' || tag === 'INPUT');
-            var hasTimeWord = (txt.indexOf('月') !== -1 || txt.indexOf('时') !== -1 ||
-                               txt.indexOf('分') !== -1 || txt.indexOf('日') !== -1 ||
-                               /^\d{1,2}$/.test(txt));
-            if(isDropdown || hasTimeWord){
-                out.push({tag:tag, cls:cls.substring(0,80), txt:txt,
-                          x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
-            }
-        }
-        return JSON.stringify(out);
-    })()
-    """, 152)
-    log(f"  弹窗DOM探测: {dom_info}")
+    # 弹窗DOM探测调试已移除（遍历全DOM会15s超时拖累流程）
 
     def click_select_option(select_idx, targets, mid_base):
         """点开第 select_idx 个(0-based)下拉，找 targets 中任一文字点击"""
-        sels_r = js(wsc, """
-        (function(){
-            var sels = document.querySelectorAll('[class*="arco-select-view-value"],[class*="arco-select-view-input"],[class*="select-view-value"]');
-            var out = [];
-            for(var i=0;i<sels.length;i++){
-                var r = sels[i].getBoundingClientRect();
-                if(r.width > 0 && r.height > 0)
-                    out.push({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)});
-            }
-            return JSON.stringify(out);
-        })()
-        """, mid_base)
-        if not sels_r:
-            log("  找不到select-view-value列表")
-            return False
-        slist = json.loads(sels_r)
+        # 等到对应序号的 select-view 渲染出来（弹窗是渐进渲染的）
+        slist = []
+        for _ in range(30):
+            sels_r = js(wsc, """
+            (function(){
+                var sels = document.querySelectorAll('[class*="arco-select-view-value"],[class*="arco-select-view-input"],[class*="select-view-value"]');
+                var out = [];
+                for(var i=0;i<sels.length;i++){
+                    var r = sels[i].getBoundingClientRect();
+                    if(r.width > 0 && r.height > 0)
+                        out.push({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)});
+                }
+                return JSON.stringify(out);
+            })()
+            """, mid_base)
+            if sels_r:
+                slist = json.loads(sels_r)
+                if len(slist) > select_idx: break
+            time.sleep(0.3)
         if select_idx >= len(slist):
             log(f"  select_idx={select_idx} 超出范围(共{len(slist)}个)")
             return False
@@ -856,7 +871,23 @@ end tell
         log(f"  cliclick 点开第{select_idx+1}个下拉 ({sx},{sy})")
         subprocess.run(["cliclick", f"c:{sx},{sy}"], capture_output=True)
         time.sleep(0.8)
-        for _ in range(8):
+        # 下拉打开后先滚到顶部，避免默认滚到当前时间导致目标选项在视野外
+        js(wsc, """
+        (function(){
+            var lists = document.querySelectorAll('[class*="arco-select-popup"],[class*="arco-virtual-list"],[class*="select-popup"]');
+            for(var i=0;i<lists.length;i++){
+                var r = lists[i].getBoundingClientRect();
+                if(r.width > 0 && r.height > 0){
+                    lists[i].scrollTop = 0;
+                    // 虚拟滚动内部容器也滚到顶
+                    var inner = lists[i].querySelector('[class*="arco-virtual-list"]') || lists[i];
+                    inner.scrollTop = 0;
+                }
+            }
+        })()
+        """, mid_base-1)
+        time.sleep(0.3)
+        for _ in range(20):  # 多给点循环，配合逐步滚动找到目标
             # 先尝试JS直接click（绕开坐标越界问题）
             js_clicked = js(wsc, f"""
             (function(){{
@@ -882,43 +913,26 @@ end tell
                 log(f"  JS点击 {js_clicked}")
                 time.sleep(0.5)
                 return True
-            # 找不到则滚动下拉容器（虚拟滚动场景），再重试
+            # 找不到则往下滚动下拉容器（已先滚到顶，逐步往下扫描所有选项）
             js(wsc, """
             (function(){
                 var lists = document.querySelectorAll('[class*="arco-select-popup"],[class*="arco-virtual-list"],[class*="select-popup"]');
                 for(var i=0;i<lists.length;i++){
                     var r = lists[i].getBoundingClientRect();
                     if(r.width > 0 && r.height > 0){
-                        lists[i].scrollTop += 200;
+                        lists[i].scrollTop += 80;
+                        var inner = lists[i].querySelector('[class*="arco-virtual-list"]') || lists[i];
+                        inner.scrollTop += 80;
                     }
                 }
             })()
             """, mid_base+2)
-            time.sleep(0.3)
+            time.sleep(0.2)
         log(f"  未找到目标选项: {targets}")
         return False
 
-    # 等弹窗里的三个下拉真正渲染出来（cliclick点击到弹窗加载完成有延迟）
-    popup_ready = False
-    for _ in range(20):
-        v_cnt = js(wsc, """
-        (function(){
-            return document.querySelectorAll('[class*="arco-select-view-value"],[class*="arco-select-view-input"]').length;
-        })()
-        """, 158)
-        if v_cnt and int(v_cnt) >= 3:
-            popup_ready = True; break
-        time.sleep(0.5)
-    if not popup_ready:
-        log("  弹窗没完全渲染，重新点定时发布按钮")
-        subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of process "创作罐头" to true'], capture_output=True)
-        time.sleep(0.3)
-        subprocess.run(["cliclick", f"c:{timer_btn_x},{timer_btn_y}"], capture_output=True)
-        time.sleep(3)
-        for _ in range(20):
-            v_cnt = js(wsc, """(function(){return document.querySelectorAll('[class*="arco-select-view"]').length;})()""", 159)
-            if v_cnt and int(v_cnt) >= 3: break
-            time.sleep(0.5)
+    # 等弹窗里的第一个下拉出现即可（click_select_option内部会自己等到3个都到位）
+    time.sleep(1.2)
 
     if not click_select_option(0, [t_date1, t_date2], 160):
         wsc.close()
@@ -934,31 +948,25 @@ end tell
     log(f"  定时时间设置完成: {timer_time}")
     time.sleep(0.5)
 
-    # 点"预览并定时发布"
-    wv_cur = get_wv()
-    v_prev = js(wsc, """
+    # JS 直接点"预览并定时发布"按钮
+    prev_clicked = js(wsc, """
     (function(){
         var btns = document.querySelectorAll('button');
         for(var i=0;i<btns.length;i++){
             var t = btns[i].textContent.trim();
             if(t.indexOf('\u9884\u89c8') !== -1 && t.indexOf('\u5b9a\u65f6') !== -1 && !btns[i].disabled){
-                var r = btns[i].getBoundingClientRect();
-                if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
+                btns[i].click();
+                return 'clicked';
             }
         }
         return null;
     })()
     """, 190)
-    if not v_prev:
+    if prev_clicked != 'clicked':
         wsc.close()
         return False, "找不到预览并定时发布按钮"
-
-    pp = json.loads(v_prev)
-    px = wv_cur['sx'] + pp['x']
-    py = wv_cur['sy'] + pp['y']
-    log(f"  cliclick 点击预览并定时发布 ({px},{py})")
-    subprocess.run(["cliclick", f"c:{px},{py}"], capture_output=True)
-    time.sleep(4)
+    log("  JS点击预览并定时发布")
+    time.sleep(3)
 
     # 打印当前页面所有可见按钮（调试用）
     btns_now = js(wsc, """
@@ -976,46 +984,52 @@ end tell
     """, 192)
     log(f"  当前可见按钮: {btns_now}")
 
-    # 等预览页的"定时发布"按钮（跟编辑页同名，用坐标区分：编辑页那个在timer_btn_y附近，预览层的在不同位置）
+    # JS 直接点预览页的"定时发布"按钮（跟编辑页同名——预览层是后渲染的，取最后一个）
+    # click 后做二次校验：按钮没消失就补点，避免click事件被React吞掉导致丢一篇
+    click_expr = """
+    (function(){
+        var btns = document.querySelectorAll('button');
+        var matched = [];
+        for(var i=0;i<btns.length;i++){
+            var t = btns[i].textContent.trim();
+            if(t === '\u5b9a\u65f6\u53d1\u5e03' && !btns[i].disabled){
+                var r = btns[i].getBoundingClientRect();
+                if(r.width > 0 && r.height > 0) matched.push(btns[i]);
+            }
+        }
+        if(matched.length === 0) return null;
+        matched[matched.length - 1].click();
+        return 'clicked:' + matched.length;
+    })()
+    """
     confirm_clicked = False
     for _ in range(60):
         time.sleep(0.5)
-        v2 = js(wsc, f"""
-        (function(){{
-            var oldY = {p_t['y']};
-            var btns = document.querySelectorAll('button');
-            var candidates = [];
-            for(var i=0;i<btns.length;i++){{
-                var t = btns[i].textContent.trim();
-                if(t === '\u5b9a\u65f6\u53d1\u5e03' && !btns[i].disabled){{
-                    var r = btns[i].getBoundingClientRect();
-                    if(r.width > 0 && r.height > 0){{
-                        candidates.push({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2), w:r.width}});
-                    }}
-                }}
-            }}
-            if(candidates.length === 0) return null;
-            // 优先取y与编辑页原按钮差距>30的（预览层的按钮位置不同）
-            var best = null;
-            for(var k=0;k<candidates.length;k++){{
-                if(Math.abs(candidates[k].y - oldY) > 30){{ best = candidates[k]; break; }}
-            }}
-            // 兜底：只有一个就用它
-            if(!best && candidates.length === 1) best = candidates[0];
-            // 还不行取最后一个（预览层通常在后添加的DOM）
-            if(!best) best = candidates[candidates.length - 1];
-            return JSON.stringify(best);
-        }})()
-        """, 191)
-        if v2:
-            p2 = json.loads(v2)
-            wv_cur = get_wv()
-            cx = wv_cur['sx'] + p2['x']
-            cy = wv_cur['sy'] + p2['y']
-            log(f"  cliclick 点击预览页定时发布 ({cx},{cy})")
-            subprocess.run(["cliclick", f"c:{cx},{cy}"], capture_output=True)
-            confirm_clicked = True
-            break
+        v2 = js(wsc, click_expr, 191)
+        if not v2:
+            continue
+        log(f"  JS点击预览页定时发布 ({v2})")
+        confirm_clicked = True
+        # 二次校验：等1.5秒看按钮是否消失/URL是否跳转，没动就补点
+        for retry in range(2):
+            time.sleep(1.5)
+            still = js(wsc, """
+            (function(){
+                var btns = document.querySelectorAll('button');
+                for(var i=0;i<btns.length;i++){
+                    if(btns[i].textContent.trim() === '\u5b9a\u65f6\u53d1\u5e03' && !btns[i].disabled){
+                        var r = btns[i].getBoundingClientRect();
+                        if(r.width > 0 && r.height > 0) return 1;
+                    }
+                }
+                return 0;
+            })()
+            """, 193 + retry)
+            if not still or int(still) == 0:
+                break
+            log(f"  按钮仍在，补点一次（retry={retry+1}）")
+            js(wsc, click_expr, 195 + retry)
+        break
 
     if not confirm_clicked:
         wsc.close()
@@ -1110,6 +1124,38 @@ def main():
     main_ws = ws_connect(main_ws_url, timeout=10)
     log("已连接主窗口")
 
+    # 隐藏所有非罐头的可见应用 + 罐头按当前屏幕分辨率最大化（不写死像素，每台机子都适配）
+    subprocess.run(["osascript", "-e", '''
+tell application "Finder"
+    set sb to bounds of window of desktop
+    set screenW to item 3 of sb
+    set screenH to item 4 of sb
+end tell
+tell application "System Events"
+    repeat with p in (every process whose visible is true and background only is false)
+        set pname to name of p
+        if pname is not "创作罐头" and pname is not "罐头" and pname is not "Finder" then
+            try
+                set visible of p to false
+            end try
+        end if
+    end repeat
+end tell
+tell application "创作罐头" to activate
+delay 0.5
+tell application "System Events"
+    tell process "创作罐头"
+        set frontmost to true
+        tell window 1
+            set position to {0, 25}
+            set size to {screenW, screenH - 25}
+        end tell
+    end tell
+end tell
+'''], capture_output=True)
+    time.sleep(1.0)
+    log("已隐藏其他应用+罐头按屏幕分辨率最大化")
+
     fail_records = []
     success_count = 0
 
@@ -1125,7 +1171,9 @@ def main():
                 fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, doc_name or "", "文档不存在"))
                 continue
         else:
-            remaining = [d for d in all_docs if d not in [r[3] for r in fail_records]]
+            # r[3] 存的是 basename，all_docs 是绝对路径，要按 basename 比对
+            failed_basenames = {r[3] for r in fail_records if r[3]}
+            remaining = [d for d in all_docs if os.path.basename(d) not in failed_basenames]
             if not remaining:
                 remaining = all_docs
             if not remaining:
