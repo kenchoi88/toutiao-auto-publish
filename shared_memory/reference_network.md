@@ -16,6 +16,8 @@ originSessionId: 0e9e6cdf-de45-458d-b2ce-c21a71bbed5d
 
 - 台式机22端口有问题，固定用2222
 - 传文件到台机：`scp -P 2222 本地文件 kench@192.168.10.8:C:/目标路径`
+- **台机SSH地址不随物理网络变化**：无论台机走家里路由器/移动网络/咖啡店WiFi，`ssh -p 2222 kench@192.168.10.8` 一直通（缺哥那边配了反向隧道/DDNS之类的转发，对客户端透明）。所以遇到"台机不在内网"时**别再问连接方式，直接 ssh 试**——别再像 2026-04-19 阿良那样去查 ~/.ssh/config 还问"是不是有外网IP"
+- 在台机上跑命令默认 cmd.exe，不认识 `tail`/`grep`，要用 git bash：`ssh -p 2222 kench@192.168.10.8 '"C:/Program Files/Git/bin/bash.exe" -c "你的命令"'`
 
 ## 陈平安（OpenClaw）接口
 - Gateway端口：`localhost:18789`
