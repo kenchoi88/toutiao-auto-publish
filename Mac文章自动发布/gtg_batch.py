@@ -19,6 +19,7 @@ import shutil
 import glob
 import sys
 import random
+import re
 from datetime import datetime, timedelta
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -73,7 +74,7 @@ _PENDING_HEADERS = ["账号名", "漏发数", "文稿名", "生成时间"]
 _HISTORY_HEADERS = ["补齐日期", "账号名", "补齐篇数", "漏发生成时间"]
 
 def _ensure_config_excel():
-    """如果账号配置.xlsx不存在则自动创建（含8个sheet）；已存在则确保新sheet有表头"""
+    """如果账号配置.xlsx不存在则自动创建（含6个sheet）；已存在则确保新sheet有表头"""
     if not os.path.exists(CONFIG_EXCEL):
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -1223,52 +1224,204 @@ end tell
     log(f"  选择文档屏幕坐标: ({screen_x},{screen_y})")
 
     doc_escaped = doc_path.replace("\\", "/")
+    safe_path = doc_escaped.replace("\\", "\\\\").replace('"', '\\"')
     result_holder = [None]
 
-    def fill_dialog():
-        time.sleep(3.0)
-        # 写剪贴板 + 校验 + 至多 3 次重试，防止被通用剪贴板/管理器/并发覆盖
-        for attempt in range(3):
-            subprocess.run(["pbcopy"], input=doc_escaped.encode("utf-8"))
-            time.sleep(0.15)
-            actual = subprocess.run(["pbpaste"], capture_output=True).stdout.decode("utf-8", errors="replace")
-            if actual == doc_escaped:
-                break
-            log(f"  ! 剪贴板校验失败(第{attempt+1}次) 期望={doc_escaped!r} 实际={actual!r}")
+    def sheet_exists():
+        r = subprocess.run(["osascript", "-e",
+            'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of window 1)'],
+            capture_output=True, text=True)
+        return 'true' in r.stdout.lower()
+
+    def go_to_folder_sheet_exists():
+        r = subprocess.run(["osascript", "-e",
+            'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of sheet 1 of window 1)'],
+            capture_output=True, text=True)
+        return 'true' in r.stdout.lower()
+
+    def get_sheet_rect():
+        """拿主对话框 position+size。entire contents 会超时，但 position/size 直接读很快。"""
+        r = subprocess.run(["osascript", "-e", '''
+tell application "System Events"
+    tell process "创作罐头"
+        try
+            set {px, py} to position of sheet 1 of window 1
+            set {sw, sh} to size of sheet 1 of window 1
+            return (px as string) & "|" & (py as string) & "|" & (sw as string) & "|" & (sh as string)
+        on error
+            return ""
+        end try
+    end tell
+end tell
+'''], capture_output=True, text=True, timeout=5)
+        try:
+            nums = re.findall(r"\d+", r.stdout)
+            if len(nums) >= 4:
+                return tuple(int(v) for v in nums[:4])
+        except Exception:
+            pass
+        return None
+
+    def click_dialog_button(which):
+        """which: 'open' 或 'cancel'。cliclick 物理点击，不经 keystroke，不受 frontmost 焦点影响。"""
+        rect = get_sheet_rect()
+        if not rect:
+            return False
+        x, y, w, h = rect
+        if which == 'open':
+            cx, cy = x + w - 55, y + h - 35
         else:
-            log(f"  ! 剪贴板3次都被偷，放弃本篇")
+            cx, cy = x + w - 150, y + h - 35
+        subprocess.run(["cliclick", f"m:{cx},{cy}"], capture_output=True)
+        time.sleep(0.1)
+        subprocess.run(["cliclick", f"c:{cx},{cy}"], capture_output=True)
+        time.sleep(0.5)
+        return True
+
+    def fill_dialog():
+        # 等对话框出现
+        deadline = time.time() + 15
+        appeared = False
+        while time.time() < deadline:
+            if sheet_exists():
+                appeared = True
+                break
+            time.sleep(0.3)
+        if not appeared:
+            result_holder[0] = False
+            return
+        time.sleep(0.6)
+
+        # Step 1: Cmd+Shift+G 开"前往文件夹" + 直接赋值 text field（绕过 clipboard）
+        r = subprocess.run(["osascript", "-e", f'''
+tell application "创作罐头" to activate
+delay 0.3
+tell application "System Events"
+    tell process "创作罐头"
+        keystroke "g" using {{command down, shift down}}
+        delay 1.5
+        try
+            set target to text field 1 of sheet 1 of sheet 1 of window 1
+            set value of target to "{safe_path}"
+            delay 0.3
+            set rb to (value of target) as string
+            if rb is "{safe_path}" then
+                return "OK"
+            else
+                return "ERR:readback:" & rb
+            end if
+        on error errmsg
+            return "ERR:" & errmsg
+        end try
+    end tell
+end tell
+'''], capture_output=True, text=True, timeout=20)
+        direct_ok = "OK" in (r.stdout or "")
+
+        if not direct_ok:
+            log(f"  直接赋值失败（{(r.stdout or '').strip()[:80]}），回退clipboard")
+            subprocess.run(["osascript", "-e",
+                'tell application "System Events" to tell process "创作罐头" to key code 53'],
+                capture_output=True)
+            time.sleep(0.5)
+            clipboard_ok = False
+            for _ in range(5):
+                subprocess.run(["pbcopy"], input=doc_escaped.encode("utf-8"))
+                time.sleep(0.15)
+                rb = subprocess.run(["pbpaste"], capture_output=True).stdout.decode("utf-8", errors="replace")
+                if rb.strip() == doc_escaped.strip():
+                    clipboard_ok = True
+                    break
+                time.sleep(0.2)
+            if not clipboard_ok:
+                log("  clipboard 校验 5 次失败")
+                click_dialog_button('cancel')
+                result_holder[0] = False
+                return
+            subprocess.run(["osascript", "-e", '''
+tell application "创作罐头" to activate
+delay 0.3
+tell application "System Events"
+    tell process "创作罐头"
+        keystroke "g" using {command down, shift down}
+        delay 1.5
+        keystroke "a" using {command down}
+        delay 0.4
+        keystroke "v" using {command down}
+        delay 1.2
+    end tell
+end tell
+'''], capture_output=True)
+
+        # Step 2: 回车关"前往文件夹"小框，最多 5 次
+        go_closed = False
+        for i in range(5):
+            subprocess.run(["osascript", "-e", '''
+tell application "创作罐头" to activate
+delay 0.1
+tell application "System Events"
+    tell process "创作罐头"
+        keystroke return
+    end tell
+end tell
+'''], capture_output=True)
+            time.sleep(0.8)
+            if not go_to_folder_sheet_exists():
+                go_closed = True
+                if i > 0:
+                    log(f"  前往文件夹 回车{i+1}次后关闭")
+                break
+        if not go_closed:
+            log("  前往文件夹 5次回车未关 → cliclick 点取消")
+            click_dialog_button('cancel')
             result_holder[0] = False
             return
 
-        subprocess.run(["osascript", "-e", f"""
-tell application "System Events"
-    keystroke "g" using {{command down, shift down}}
-    delay 2.0
-    keystroke "a" using {{command down}}
-    delay 0.5
-    keystroke "v" using {{command down}}
-    delay 1.5
-    keystroke return
-    delay 3.0
-    keystroke return
-end tell
-"""], capture_output=True)
-        # 粘贴完再校验一次，确认 Cmd+V 那一刻剪贴板还是对的
-        post = subprocess.run(["pbpaste"], capture_output=True).stdout.decode("utf-8", errors="replace")
-        if post != doc_escaped:
-            log(f"  ! 粘贴后剪贴板已变 期望={doc_escaped!r} 实际={post!r}")
-        result_holder[0] = True
+        # Step 3: 等主对话框自动关闭（完整文件路径 NSOpenPanel 会直接打开）
+        for _ in range(12):
+            time.sleep(0.5)
+            if not sheet_exists():
+                result_holder[0] = True
+                return
 
-    t = threading.Thread(target=fill_dialog, daemon=True)
-    t.start()
-    time.sleep(0.2)
+        # Step 4: 主框没关 → cliclick 物理点"打开"按钮
+        log("  主对话框未自动关闭 → cliclick 点打开按钮")
+        for _ in range(3):
+            if not click_dialog_button('open'):
+                break
+            for _ in range(4):
+                time.sleep(0.5)
+                if not sheet_exists():
+                    result_holder[0] = True
+                    return
 
-    subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
-    t.join(timeout=25)
+        # Step 5: 彻底卡死 → 点取消
+        log("  对话框完全卡死 → cliclick 点取消")
+        click_dialog_button('cancel')
+        result_holder[0] = False
 
-    if not result_holder[0]:
+    # 外层最多 3 次重试，扛住偶发对话框 hang（原本只试 1 次，现加上）
+    dialog_ok = False
+    for dialog_attempt in range(3):
+        result_holder[0] = None
+        t = threading.Thread(target=fill_dialog, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
+        t.join(timeout=45)
+        if result_holder[0]:
+            dialog_ok = True
+            if dialog_attempt > 0:
+                log(f"  文件对话框第{dialog_attempt+1}次成功")
+            break
+        # 保险：失败前再点一次取消确保对话框真关了
+        click_dialog_button('cancel')
+        time.sleep(1)
+        log(f"  第{dialog_attempt+1}次对话框处理失败，准备重试")
+
+    if not dialog_ok:
         wsc.close()
-        return False, "文件选择对话框未处理成功"
+        return False, "文件选择对话框反复卡住，3次重试均失败"
 
     # 等待内容加载
     time.sleep(5)
@@ -1620,7 +1773,7 @@ def main():
         if skipped:
             log(f"已排除 {skipped} 个永不发文账号: {EXCLUDE_ACCOUNTS}")
 
-    # 读取账号配置.xlsx - 待补漏sheet（优先级最高：覆盖白名单和全局配额）
+    # 读取账号配置.xlsx - 待补漏sheet（优先级高于白名单）
     pending_mode = False
     pending_records = []  # [(name, missing, doc, gen_ts)]
     try:
@@ -1653,7 +1806,7 @@ def main():
 
     quota_map = {}  # {账号: 独立配额}；为空时走全局配额
     if pending_mode:
-        # 补漏模式：直接信任"待补漏"表里的账号名，跳过侧边栏收集结果
+        # 补漏模式：直接信任"待补漏"表里的账号名 + 各自漏发数作为配额
         accounts = [r[0] for r in pending_records]
         for name, missing, _d, _t in pending_records:
             quota_map[name] = missing
@@ -1681,11 +1834,10 @@ def main():
         main_ws.close()
         return
 
-    # 配额：补漏模式/白名单独立配额 → quota_map；否则全局 = 总篇数 ÷ 账号数
+    # 配额：白名单/补漏有独立配额就用独立配额；否则全局 = 总篇数 ÷ 账号数
     if quota_map:
         total_quota = sum(quota_map.get(a, 1) for a in accounts)
-        mode_label = "补漏" if pending_mode else "白名单独立"
-        log(f"本次发布: {len(accounts)} 个账号，{len(docs)} 篇文档，按{mode_label}配额共 {total_quota} 篇")
+        log(f"本次发布: {len(accounts)} 个账号，{len(docs)} 篇文档，按独立配额共 {total_quota} 篇")
         quota = None  # 标记走 quota_map
     else:
         quota = len(docs) // len(accounts) if len(accounts) > 0 else 1
@@ -1881,17 +2033,13 @@ def main():
     # ===== 待补漏 / 补漏历史 =====
     try:
         gen_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # 统一算每个账号的生效配额：quota_map（白名单独立/补漏模式）优先，否则全局 quota
-        if quota_map:
-            effective_quota = dict(quota_map)
-        else:
-            effective_quota = {a: quota for a in acc_count.keys()}
         new_pending = []
-        for name, q in effective_quota.items():
-            if not q or q <= 0:
+        for name in accounts + skipped_accounts:
+            q = quota_map.get(name, quota or 0)
+            if not q:
                 continue
             missing = q - acc_count.get(name, 0)
-            if missing > 0:
+            if missing > 0 and not any(n == name for n, _, _, _ in new_pending):
                 new_pending.append((name, missing, "", gen_ts))
 
         if pending_mode:
