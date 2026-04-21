@@ -23,6 +23,7 @@ import glob
 import sys
 import random
 import subprocess
+import re
 import threading
 from datetime import datetime
 import openpyxl
@@ -178,9 +179,20 @@ def js_gesture(ws, expr, mid=99):
     return r.get("result", {}).get("value")
 
 
+_gtg_minimize_recover_count = 0
+
+
 def ensure_gtg_top():
-    """每次cliclick前调用——最小化Code/Terminal等主要遮挡者，并把罐头置顶"""
-    subprocess.run(["osascript", "-e", '''
+    """每次cliclick前调用——最小化Code/Terminal等主要遮挡者，并把罐头置顶。
+    若检测到创作罐头自身被最小化，主动取消最小化并重置窗口尺寸（自愈），并打日志方便排根因。
+    """
+    global _gtg_minimize_recover_count
+    r = subprocess.run(["osascript", "-e", '''
+tell application "Finder"
+    set sb to bounds of window of desktop
+    set screenW to item 3 of sb
+    set screenH to item 4 of sb
+end tell
 tell application "System Events"
     repeat with pname in {"Code", "Google Chrome", "Safari", "Terminal", "Claude", "Feishu", "WeChat"}
         try
@@ -195,7 +207,27 @@ tell application "System Events"
     end repeat
 end tell
 tell application "创作罐头" to activate
-'''], capture_output=True)
+delay 0.2
+tell application "System Events"
+    tell process "创作罐头"
+        try
+            if (value of attribute "AXMinimized" of window 1) then
+                set value of attribute "AXMinimized" of window 1 to false
+                delay 0.5
+                tell window 1
+                    set position to {0, 25}
+                    set size to {screenW, screenH - 25}
+                end tell
+                return "RECOVERED"
+            end if
+        end try
+    end tell
+end tell
+return "OK"
+'''], capture_output=True, text=True)
+    if "RECOVERED" in (r.stdout or ""):
+        _gtg_minimize_recover_count += 1
+        log(f"  ⚠ 检测到创作罐头窗口被最小化，已自愈（累计 {_gtg_minimize_recover_count} 次）")
     time.sleep(0.3)
 
 
@@ -607,9 +639,61 @@ end tell
         ], capture_output=True, text=True)
         return 'true' in r.stdout.lower()
 
+    def go_to_folder_sheet_exists():
+        r = subprocess.run([
+            "osascript", "-e",
+            'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of sheet 1 of window 1)'
+        ], capture_output=True, text=True)
+        return 'true' in r.stdout.lower()
+
+    def get_sheet_rect():
+        """拿主对话框 position+size。NSOpenPanel 在新 macOS 里 entire contents 遍历超时，
+        但 position/size 直接读很快。返回 (x,y,w,h) 或 None。"""
+        r = subprocess.run(["osascript", "-e", '''
+tell application "System Events"
+    tell process "创作罐头"
+        try
+            set {px, py} to position of sheet 1 of window 1
+            set {sw, sh} to size of sheet 1 of window 1
+            return (px as string) & "|" & (py as string) & "|" & (sw as string) & "|" & (sh as string)
+        on error
+            return ""
+        end try
+    end tell
+end tell
+'''], capture_output=True, text=True, timeout=5)
+        try:
+            nums = re.findall(r"\d+", r.stdout)
+            if len(nums) >= 4:
+                return tuple(int(v) for v in nums[:4])
+        except Exception:
+            pass
+        return None
+
+    def click_dialog_button(which):
+        """which: 'open' 或 'cancel'。NSOpenPanel 右下角按钮坐标相对固定，
+        用 cliclick 物理点击不经 keystroke，不受 frontmost 焦点影响。"""
+        rect = get_sheet_rect()
+        if not rect:
+            return False
+        x, y, w, h = rect
+        if which == 'open':
+            cx, cy = x + w - 55, y + h - 35
+        else:
+            cx, cy = x + w - 150, y + h - 35
+        subprocess.run(["cliclick", f"m:{cx},{cy}"], capture_output=True)
+        time.sleep(0.1)
+        subprocess.run(["cliclick", f"c:{cx},{cy}"], capture_output=True)
+        time.sleep(0.5)
+        return True
+
     def press_esc(times=2):
-        """对话框卡住时主动 ESC 关掉，避免堵塞后续操作"""
+        """兜底关对话框。优先 cliclick 点'取消'（物理层不受焦点影响），
+        不行再 fallback key code 53。"""
+        click_dialog_button('cancel')
         for _ in range(times):
+            if not sheet_exists():
+                return
             subprocess.run(["osascript", "-e", '''
 tell application "System Events"
     tell process "创作罐头"
@@ -632,31 +716,112 @@ end tell
             result_holder[0] = False
             return
         time.sleep(0.6)
-        # set the clipboard 内联，避免 pbcopy 时序问题
-        subprocess.run(["osascript", "-e", f'''
-set the clipboard to "{safe_path}"
+        # 方案A：直接给"前往文件夹"输入框赋值，绕过 clipboard。
+        # clipboard 方案会被输入法/剪贴板管理器/循环间隔偶发污染，定时发布多账号连发时尤甚。
+        # UI 路径由 probe_dialog.py 探测确认：text field 1 of sheet 1 of sheet 1 of window 1
+        r = subprocess.run(["osascript", "-e", f'''
+tell application "创作罐头" to activate
 delay 0.3
 tell application "System Events"
-    keystroke "g" using {{command down, shift down}}
-    delay 1.5
-    keystroke "a" using {{command down}}
-    delay 0.4
-    keystroke "v" using {{command down}}
-    delay 1.2
-    keystroke return
-    delay 2.5
-    keystroke return
+    tell process "创作罐头"
+        keystroke "g" using {{command down, shift down}}
+        delay 1.5
+        try
+            set target to text field 1 of sheet 1 of sheet 1 of window 1
+            set value of target to "{safe_path}"
+            delay 0.3
+            set rb to (value of target) as string
+            if rb is "{safe_path}" then
+                return "OK"
+            else
+                return "ERR:readback:" & rb
+            end if
+        on error errmsg
+            return "ERR:" & errmsg
+        end try
+    end tell
+end tell
+'''], capture_output=True, text=True, timeout=20)
+        direct_ok = "OK" in (r.stdout or "")
+        if not direct_ok:
+            log(f"  直接赋值失败（{(r.stdout or '').strip()[:80]}），回退clipboard")
+            # 关掉可能残留的"前往文件夹"小框
+            press_esc(1)
+            time.sleep(0.5)
+            # 方案B：pbcopy + pbpaste 校验 + 最多 5 次重试，挡住 clipboard 被污染
+            clipboard_ok = False
+            for _ in range(5):
+                subprocess.run(["pbcopy"], input=doc_escaped, text=True)
+                time.sleep(0.15)
+                rb = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+                if rb.strip() == doc_escaped.strip():
+                    clipboard_ok = True
+                    break
+                time.sleep(0.2)
+            if not clipboard_ok:
+                log("  clipboard 校验 5 次失败")
+                result_holder[0] = False
+                return
+            subprocess.run(["osascript", "-e", '''
+tell application "创作罐头" to activate
+delay 0.3
+tell application "System Events"
+    tell process "创作罐头"
+        keystroke "g" using {command down, shift down}
+        delay 1.5
+        keystroke "a" using {command down}
+        delay 0.4
+        keystroke "v" using {command down}
+        delay 1.2
+    end tell
 end tell
 '''], capture_output=True)
-        # 等对话框消失（说明文件真的被打开了）；超时 = hang 住
-        for _ in range(20):  # 最多 10 秒
+
+        # Step 2: 按回车关"前往文件夹"小框，最多 5 次（keystroke 偶发焦点问题需检测+重试）
+        go_closed = False
+        for i in range(5):
+            subprocess.run(["osascript", "-e", '''
+tell application "创作罐头" to activate
+delay 0.1
+tell application "System Events"
+    tell process "创作罐头"
+        keystroke return
+    end tell
+end tell
+'''], capture_output=True)
+            time.sleep(0.8)
+            if not go_to_folder_sheet_exists():
+                go_closed = True
+                if i > 0:
+                    log(f"  前往文件夹 回车{i+1}次后关闭")
+                break
+        if not go_closed:
+            log("  前往文件夹 5次回车未关 → cliclick 点取消")
+            click_dialog_button('cancel')
+            result_holder[0] = False
+            return
+
+        # Step 3: 等主对话框自动关闭（完整文件路径会被 NSOpenPanel 直接打开）
+        for _ in range(12):  # 最多 6 秒
             time.sleep(0.5)
             if not sheet_exists():
                 result_holder[0] = True
                 return
-        # hang 了：ESC 关掉，标记失败让外层重试
-        log("  文件对话框 hang 住，ESC 取消后重试")
-        press_esc(2)
+
+        # Step 4: 主框没自动关 → cliclick 物理点"打开"按钮（最多 3 次）
+        log("  主对话框未自动关闭 → cliclick 点打开按钮")
+        for _ in range(3):
+            if not click_dialog_button('open'):
+                break
+            for _ in range(4):  # 等 2 秒
+                time.sleep(0.5)
+                if not sheet_exists():
+                    result_holder[0] = True
+                    return
+
+        # Step 5: 彻底卡死 → 点取消，外层 3 次重试会重开"选择文档"
+        log("  对话框完全卡死 → cliclick 点取消")
+        click_dialog_button('cancel')
         result_holder[0] = False
 
     # 重试最多 3 次，扛住偶发对话框 hang
