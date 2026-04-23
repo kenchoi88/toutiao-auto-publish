@@ -3,13 +3,21 @@
   Mac文章定时自动发布/
   ├── go.command          双击运行
   ├── gtg_timer.py
-  ├── 定时发布.xlsx        配置：账号名 | 发布时间 | 文档文件名
+  ├── 定时发布.xlsx        配置：B1=日期；A4起 账号名 | 发文数(1/2/3)
   ├── 素材/               放 .docx 文件
   │   └── 已发送/         发完自动移入
   └── 运行报告/YYYYMMDD/
 
-定时发布.xlsx 格式（第1行标题，从第2行起）：
-  A列 账号名     B列 发布时间（2026-04-18 14:30）   C列 文档文件名（不含路径，可为空则随机取）
+定时发布.xlsx 结构：
+  A1: "发布日期"       B1: 2026-04-23         ← 每次只改这一格
+  A3: "账号名"         B3: "发文数"           ← 表头
+  A4起 数据行：        A=账号名               B=发文数（1/2/3）
+
+自动排程规则：
+  - 早窗 08:01 起：发文数≥1 的账号各发 1 篇
+  - 中窗 12:01 起：发文数≥2 的账号各发 1 篇
+  - 晚窗 19:01 起：发文数=3 的账号各发 1 篇
+  - 每窗内按 Excel 顺序，相邻账号间隔 1 分钟（超出自然延后，不截断）
 """
 
 import requests
@@ -25,7 +33,7 @@ import random
 import subprocess
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
@@ -47,10 +55,11 @@ NOFIRST_ACCOUNTS = set()
 NO_PROXY = {"http": "", "https": ""}
 WS_OPTS  = {"suppress_origin": True}
 
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-DOCS_FOLDER = os.path.join(BASE_DIR, "素材")
-SENT_FOLDER = os.path.join(BASE_DIR, "素材", "已发送")
-TIMER_EXCEL = os.path.join(BASE_DIR, "定时发布.xlsx")
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+DOCS_FOLDER  = os.path.join(BASE_DIR, "素材")
+SENT_FOLDER  = os.path.join(BASE_DIR, "素材", "已发送")
+TIMER_EXCEL  = os.path.join(BASE_DIR, "定时发布.xlsx")      # 只存 B1 发布日期
+CONFIG_EXCEL = os.path.join(BASE_DIR, "账号配置.xlsx")       # 与自动发那边同结构可互换
 
 RUN_REPORT_DIR = None
 LOG_FILE       = None
@@ -108,34 +117,101 @@ def write_fail_excel(final_fails):
         log(f"  写入失败记录出错: {e}")
 
 
-def _read_timer_excel():
-    """读取定时发布.xlsx，返回任务列表 [(账号名, 发布时间str, 文档文件名或None), ...]"""
-    tasks = []
+def _read_publish_date():
+    """从 定时发布.xlsx B1 读取发布日期字符串 yyyy-mm-dd"""
     if not os.path.exists(TIMER_EXCEL):
         log(f"错误: 定时发布.xlsx 不存在: {TIMER_EXCEL}")
-        return tasks
+        return None
     try:
         wb = openpyxl.load_workbook(TIMER_EXCEL, read_only=True, data_only=True)
         ws = wb.active
-        for row in ws.iter_rows(min_row=2, max_col=3, values_only=True):
-            name_v, time_v, doc_v = row[0], row[1], row[2] if len(row) > 2 else None
-            if not name_v:
-                continue
-            name_v = str(name_v).strip()
-            if not name_v or name_v.startswith('#'):
-                continue
-            if time_v is None:
-                log(f"  跳过 {name_v}：发布时间为空")
-                continue
-            if hasattr(time_v, 'strftime'):
-                t_str = time_v.strftime("%Y-%m-%d %H:%M")
-            else:
-                t_str = str(time_v).strip()[:16]
-            doc_name = str(doc_v).strip() if doc_v else None
-            tasks.append((name_v, t_str, doc_name))
+        v = ws.cell(row=1, column=2).value
         wb.close()
+        if not v:
+            log("错误: 定时发布.xlsx B1 未填发布日期")
+            return None
+        return v.strftime("%Y-%m-%d") if hasattr(v, 'strftime') else str(v).strip()[:10]
     except Exception as e:
         log(f"读取定时发布.xlsx失败: {e}")
+        return None
+
+
+def _read_skip_set():
+    """读账号配置.xlsx「永久跳过」sheet，返回要剔除的账号集合"""
+    skip = set()
+    if not os.path.exists(CONFIG_EXCEL):
+        return skip
+    try:
+        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
+        if "永久跳过" in wb.sheetnames:
+            for row in wb["永久跳过"].iter_rows(min_row=2, max_col=1, values_only=True):
+                v = row[0]
+                if v:
+                    s = str(v).strip()
+                    if s and not s.startswith("#"):
+                        skip.add(s)
+        wb.close()
+    except Exception as e:
+        log(f"读取永久跳过失败: {e}")
+    return skip
+
+
+def _read_whitelist():
+    """读账号配置.xlsx「白名单」sheet：返回 [(账号名, 发文份数)]。
+    白名单非空时代表缺哥手动指定「只发这些账号」，是第一优先级。
+    """
+    wl = []
+    if not os.path.exists(CONFIG_EXCEL):
+        return wl
+    try:
+        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
+        if "白名单" in wb.sheetnames:
+            for row in wb["白名单"].iter_rows(min_row=2, max_col=2, values_only=True):
+                name_v, q_v = row[0], row[1]
+                if not name_v:
+                    continue
+                name = str(name_v).strip()
+                if not name or name.startswith("#"):
+                    continue
+                try:
+                    q = int(q_v) if q_v is not None else 3
+                except (ValueError, TypeError):
+                    q = 3
+                if q < 1:
+                    q = 1
+                if q > 3:
+                    q = 3
+                wl.append((name, q))
+        wb.close()
+    except Exception as e:
+        log(f"读取白名单失败: {e}")
+    return wl
+
+
+def _expand_tasks(accounts_quota, date_str):
+    """按 早/中/晚 窗 + 8 分钟间隔 展开任务：
+      - 早窗 07:00 起：发文数≥1 的账号各 1 篇
+      - 中窗 12:00 起：发文数≥2 的账号各 1 篇
+      - 晚窗 17:00 起：发文数=3 的账号各 1 篇
+    间隔 8 分钟；若账号较多导致时间溢出窗口上限，自然延后，不截断。
+    """
+    GAP_MIN = 1
+    windows = [
+        ("早", "08:01", [n for n, q in accounts_quota if q >= 1]),
+        ("中", "12:01", [n for n, q in accounts_quota if q >= 2]),
+        ("晚", "19:01", [n for n, q in accounts_quota if q >= 3]),
+    ]
+    tasks = []
+    for label, start_str, names in windows:
+        if not names:
+            continue
+        base = datetime.strptime(f"{date_str} {start_str}", "%Y-%m-%d %H:%M")
+        for i, name in enumerate(names):
+            t = base + timedelta(minutes=GAP_MIN * i)
+            tasks.append((name, t.strftime("%Y-%m-%d %H:%M")))
+        last = base + timedelta(minutes=GAP_MIN * (len(names) - 1))
+        log(f"  {label}窗 {start_str} 起 {len(names)} 个账号（末个 {last.strftime('%H:%M')}）")
+    tasks.sort(key=lambda x: x[1])
     return tasks
 
 
@@ -310,6 +386,67 @@ def scroll_find_account(main_ws, name):
                 same_count = 0
 
     return None
+
+
+def collect_accounts(main_ws):
+    """从罐头左侧栏读取所有账号（处理虚拟滚动列表）"""
+    log("开始收集账号列表...")
+    js(main_ws, """
+    (function(){
+        var c = document.querySelector('[class*="menuMainWarpper"]');
+        if(c) c.scrollTop = 0;
+    })()
+    """, 110)
+    time.sleep(0.8)
+
+    accounts = []
+    seen = set()
+    same_count = 0
+    has_scrolled = False
+
+    for _ in range(1000):
+        v = js(main_ws, f"""
+        (function(){{
+            var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+            var names = [];
+            for(var i=0;i<items.length;i++){{
+                var t = items[i].textContent.trim();
+                if(t) names.push(t);
+            }}
+            return JSON.stringify(names);
+        }})()
+        """, 111)
+        if v:
+            for n in json.loads(v):
+                if n not in seen:
+                    seen.add(n)
+                    accounts.append(n)
+
+        result = js(main_ws, """
+        (function(){
+            var c = document.querySelector('[class*="menuMainWarpper"]');
+            if(!c) return 'no';
+            var before = c.scrollTop;
+            c.scrollTop += 200;
+            return before + '->' + c.scrollTop;
+        })()
+        """, 112)
+        time.sleep(0.3)
+
+        if result and result != "no":
+            parts = result.split("->")
+            if len(parts) == 2:
+                before_top, after_top = parts[0].strip(), parts[1].strip()
+                if after_top != '0' and after_top != before_top:
+                    has_scrolled = True
+                    same_count = 0
+                elif before_top == after_top and has_scrolled:
+                    same_count += 1
+                    if same_count >= 4:
+                        break
+
+    log(f"共收集到 {len(accounts)} 个账号")
+    return accounts
 
 
 def _find_webview_once(main_ws, name):
@@ -1286,6 +1423,55 @@ def get_docs():
     return sorted([d for d in docs if "已发送" not in d])
 
 
+def _finalize_config(accounts_quota, success_by_acct, fail_docs_by_acct=None):
+    """收尾：清空账号配置.xlsx「白名单」；把提交失败的账号写入「待补漏」。
+    漏发数 = quota - 本次提交成功数（只考虑提交阶段，不管次日罐头实际发布）
+    fail_docs_by_acct: {账号: [失败的文档basename...]}，用于填写「待补漏」的文稿名列
+    """
+    if not os.path.exists(CONFIG_EXCEL):
+        log(f"警告: 账号配置.xlsx 不存在，跳过收尾")
+        return
+    fail_docs_by_acct = fail_docs_by_acct or {}
+    try:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        wb = openpyxl.load_workbook(CONFIG_EXCEL)
+
+        # 1. 清空白名单
+        if "白名单" in wb.sheetnames:
+            wl = wb["白名单"]
+            if wl.max_row >= 2:
+                wl.delete_rows(2, wl.max_row - 1)
+
+        # 2. 写待补漏（先清空旧数据再写新的）
+        pending_rows = []
+        for name, quota in accounts_quota:
+            miss = quota - success_by_acct.get(name, 0)
+            if miss > 0:
+                docs = fail_docs_by_acct.get(name, [])
+                # 文稿名列：该账号失败过的文档名拼起来（用 | 分隔），多于 miss 个也都记下便于追溯
+                doc_names = " | ".join(d for d in docs if d)
+                pending_rows.append((name, miss, doc_names, now))
+
+        if "待补漏" in wb.sheetnames:
+            pen = wb["待补漏"]
+            if pen.max_row >= 2:
+                pen.delete_rows(2, pen.max_row - 1)
+            for i, row in enumerate(pending_rows, start=2):
+                for j, v in enumerate(row, start=1):
+                    pen.cell(row=i, column=j, value=v)
+
+        wb.save(CONFIG_EXCEL)
+        log(f"\n收尾：白名单已清空")
+        if pending_rows:
+            log(f"收尾：待补漏写入 {len(pending_rows)} 行（总漏发 {sum(r[1] for r in pending_rows)} 篇）")
+            for r in pending_rows:
+                log(f"  - {r[0]} 漏 {r[1]} 篇")
+        else:
+            log(f"收尾：本次无提交失败，待补漏留空")
+    except Exception as e:
+        log(f"警告: 收尾写账号配置失败: {e}")
+
+
 def move_to_sent(doc_path):
     os.makedirs(SENT_FOLDER, exist_ok=True)
     dest = os.path.join(SENT_FOLDER, os.path.basename(doc_path))
@@ -1308,19 +1494,11 @@ def main():
     os.makedirs(DOCS_FOLDER, exist_ok=True)
     os.makedirs(SENT_FOLDER, exist_ok=True)
 
-    # 读取任务配置
-    tasks = _read_timer_excel()
-    if not tasks:
-        log("错误: 定时发布.xlsx 为空或不存在，请先填好配置")
+    # 读发布日期（定时发布.xlsx B1）
+    date_str = _read_publish_date()
+    if not date_str:
         return
-
-    log(f"共 {len(tasks)} 个定时发布任务:")
-    for name, t_time, doc_name in tasks:
-        log(f"  {name}  →  {t_time}  →  {doc_name or '(随机取素材)' }")
-
-    # 准备文档池
-    all_docs = get_docs()
-    doc_map = {os.path.basename(d): d for d in all_docs}
+    log(f"发布日期: {date_str}")
 
     # 获取主窗口
     try:
@@ -1364,71 +1542,142 @@ end tell
     time.sleep(1.0)
     log("已隐藏其他应用+罐头按屏幕分辨率最大化")
 
+    # 账号来源：白名单第一优先，为空则从罐头左侧栏动态读
+    skip = _read_skip_set()
+    if skip:
+        log(f"「永久跳过」：{sorted(skip)}")
+
+    wl = _read_whitelist()
+    if wl:
+        log(f"检测到「白名单」非空 {len(wl)} 个账号 —— 本次只发白名单指定的账号")
+        accounts_quota = [(n, q) for n, q in wl if n not in skip and n not in EXCLUDE_ACCOUNTS]
+        if len(accounts_quota) != len(wl):
+            log(f"  有 {len(wl) - len(accounts_quota)} 个白名单账号被「永久跳过/排除」过滤")
+    else:
+        log("白名单为空 —— 从罐头左侧栏动态读取所有账号")
+        all_names = collect_accounts(main_ws)
+        filtered = [n for n in all_names if n not in skip and n not in EXCLUDE_ACCOUNTS]
+        log(f"过滤后发文账号: {len(filtered)}")
+        accounts_quota = [(n, 3) for n in filtered]
+
+    if not accounts_quota:
+        log("错误: 没有可发文账号")
+        main_ws.close()
+        return
+
+    tasks = _expand_tasks(accounts_quota, date_str)
+    log(f"\n共 {len(tasks)} 个定时发布任务")
+
+    # 准备文档池：按字典序排列，顺序消费（pop(0)），不随机
+    doc_pool = list(get_docs())
+    log(f"素材池共 {len(doc_pool)} 份文稿")
+    if len(doc_pool) < len(tasks):
+        log(f"警告：素材（{len(doc_pool)}）少于任务（{len(tasks)}），后面任务将记为素材不足")
+
     fail_records = []
     success_count = 0
+    success_by_acct = {}  # 每账号提交成功篇数，收尾算漏发
+    fail_docs_by_acct = {}  # 每账号失败过的文档名列表，给待补漏用
 
-    for idx, (name, timer_time, doc_name) in enumerate(tasks):
+    doc_retry_set = set()  # 已回池过的文档路径（每篇最多回一次，防死循环）
+    def requeue_doc(p):
+        if not p or p in doc_retry_set:
+            return False
+        doc_retry_set.add(p)
+        doc_pool.append(p)  # 回池尾，让别的好素材先消耗
+        log(f"  → 文档已回池尾待后续重试: {os.path.basename(p)}")
+        return True
+
+    consecutive_fail = 0
+    MAX_CONSECUTIVE_FAIL = 3  # 连败熔断阈值
+
+    for idx, (name, timer_time) in enumerate(tasks):
         log(f"\n{'='*40}")
         log(f"任务 {idx+1}/{len(tasks)}: {name}  →  {timer_time}")
 
-        # 确定文档路径
-        if doc_name:
-            doc_path = doc_map.get(doc_name)
-            if not doc_path:
-                log(f"  X 素材文件夹中找不到: {doc_name}")
-                fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, doc_name or "", "文档不存在"))
-                continue
-        else:
-            # r[3] 存的是 basename，all_docs 是绝对路径，要按 basename 比对
-            failed_basenames = {r[3] for r in fail_records if r[3]}
-            remaining = [d for d in all_docs if os.path.basename(d) not in failed_basenames]
-            if not remaining:
-                remaining = all_docs
-            if not remaining:
-                log("  X 素材文件夹为空")
-                fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, "", "素材为空"))
-                continue
-            doc_path = random.choice(remaining)
+        # 从素材池顺序取一篇（非随机）
+        if not doc_pool:
+            log("  X 素材池已空")
+            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, "", "素材不足"))
+            fail_docs_by_acct.setdefault(name, []).append("")
+            continue
+        doc_path = doc_pool.pop(0)
 
         log(f"  文档: {os.path.basename(doc_path)}")
+
+        this_task_failed = False
+        this_task_fail_reason = ""
 
         # 找账号
         pos = scroll_find_account(main_ws, name)
         if not pos:
             log(f"  X 未找到账号: {name}")
             fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), "侧边栏未找到"))
-            continue
+            fail_docs_by_acct.setdefault(name, []).append(os.path.basename(doc_path))
+            requeue_doc(doc_path)  # 账号问题，文档本身无辜
+            this_task_failed = True
+            this_task_fail_reason = "侧边栏未找到"
+        else:
+            click(main_ws, pos["x"], pos["y"], 20)
+            time.sleep(WAIT_LOAD)
 
-        click(main_ws, pos["x"], pos["y"], 20)
-        time.sleep(WAIT_LOAD)
-
-        ws_url = find_account_webview(main_ws, name)
-        if not ws_url:
-            log("  X 找不到 webview")
-            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), "webview匹配失败"))
-            close_current_tab(main_ws)
-            continue
-
-        try:
-            success, reason = publish_article_timer(ws_url, doc_path, main_ws, name, timer_time)
-            if success:
-                move_to_sent(doc_path)
-                success_count += 1
-                log(f"  ✓ 定时发布成功: {name}")
+            ws_url = find_account_webview(main_ws, name)
+            if not ws_url:
+                log("  X 找不到 webview")
+                fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), "webview匹配失败"))
+                fail_docs_by_acct.setdefault(name, []).append(os.path.basename(doc_path))
+                requeue_doc(doc_path)
+                close_current_tab(main_ws)
+                this_task_failed = True
+                this_task_fail_reason = "webview匹配失败"
             else:
-                log(f"  X 发布失败: {reason}")
-                fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), reason))
-        except Exception as e:
-            log(f"  X 异常: {e}")
-            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), f"异常: {e}"))
-        finally:
-            close_current_tab(main_ws)
-            if idx < len(tasks) - 1:
-                _d = random.randint(8, 20)
-                log(f"  篇间等待 {_d} 秒...")
-                time.sleep(_d)
+                try:
+                    success, reason = publish_article_timer(ws_url, doc_path, main_ws, name, timer_time)
+                    if success:
+                        move_to_sent(doc_path)
+                        success_count += 1
+                        success_by_acct[name] = success_by_acct.get(name, 0) + 1
+                        log(f"  ✓ 定时发布成功: {name}")
+                    else:
+                        log(f"  X 发布失败: {reason}")
+                        fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), reason))
+                        fail_docs_by_acct.setdefault(name, []).append(os.path.basename(doc_path))
+                        requeue_doc(doc_path)  # 状态问题居多，回池尾再给一次机会
+                        this_task_failed = True
+                        this_task_fail_reason = reason
+                except Exception as e:
+                    log(f"  X 异常: {e}")
+                    fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), f"异常: {e}"))
+                    fail_docs_by_acct.setdefault(name, []).append(os.path.basename(doc_path))
+                    requeue_doc(doc_path)
+                    this_task_failed = True
+                    this_task_fail_reason = f"异常: {e}"
+                finally:
+                    close_current_tab(main_ws)
+
+        # 连败熔断 + 系统通知
+        if this_task_failed:
+            consecutive_fail += 1
+            if consecutive_fail >= MAX_CONSECUTIVE_FAIL:
+                log(f"\n!! 连续 {consecutive_fail} 次失败触发熔断（最近: {this_task_fail_reason}），脚本停止")
+                try:
+                    subprocess.run([
+                        "osascript", "-e",
+                        f'display notification "连续{consecutive_fail}次失败已停止，请检查罐头状态" with title "定时发布熔断" sound name "Sosumi"'
+                    ], capture_output=True)
+                except Exception:
+                    pass
+                break
+        else:
+            consecutive_fail = 0
+
+        if idx < len(tasks) - 1:
+            _d = random.randint(8, 20)
+            log(f"  篇间等待 {_d} 秒...")
+            time.sleep(_d)
 
     write_fail_excel(fail_records)
+    _finalize_config(accounts_quota, success_by_acct, fail_docs_by_acct)
 
     main_ws.close()
     log(f"\n{'='*50}")
