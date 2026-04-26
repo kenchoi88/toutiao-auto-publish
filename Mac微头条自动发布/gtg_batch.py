@@ -1874,38 +1874,6 @@ def main():
     main_ws = ws_connect(main_ws_url, timeout=10)
     log("已连接主窗口")
 
-    # 隐藏所有非罐头的可见应用 + 罐头按当前屏幕分辨率最大化
-    # 防止跑发布时窗口被无意操作压缩/遮挡（不写死像素，每台机子都适配）
-    subprocess.run(["osascript", "-e", '''
-tell application "Finder"
-    set sb to bounds of window of desktop
-    set screenW to item 3 of sb
-    set screenH to item 4 of sb
-end tell
-tell application "System Events"
-    repeat with p in (every process whose visible is true and background only is false)
-        set pname to name of p
-        if pname is not "创作罐头" and pname is not "罐头" and pname is not "Finder" then
-            try
-                set visible of p to false
-            end try
-        end if
-    end repeat
-end tell
-tell application "创作罐头" to activate
-delay 0.5
-tell application "System Events"
-    tell process "创作罐头"
-        set frontmost to true
-        tell window 1
-            set position to {0, 25}
-            set size to {screenW, screenH - 25}
-        end tell
-    end tell
-end tell
-'''], capture_output=True)
-    time.sleep(1.0)
-    log("已隐藏其他应用+罐头按屏幕分辨率最大化")
 
     # 不使用标签筛选，发全部账号（由 EXCLUDE_ACCOUNTS 排除不需要发的账号）
 

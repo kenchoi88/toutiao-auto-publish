@@ -260,17 +260,12 @@ _gtg_minimize_recover_count = 0
 
 def ensure_gtg_top():
     """每次cliclick前调用——最小化Code/Terminal等主要遮挡者，并把罐头置顶。
-    若检测到创作罐头自身被最小化，主动取消最小化并重置窗口尺寸（自愈），并打日志方便排根因。
+    若检测到创作罐头自身被最小化，主动取消最小化（不动窗口尺寸），并打日志方便排根因。
     """
     global _gtg_minimize_recover_count
     r = subprocess.run(["osascript", "-e", '''
-tell application "Finder"
-    set sb to bounds of window of desktop
-    set screenW to item 3 of sb
-    set screenH to item 4 of sb
-end tell
 tell application "System Events"
-    repeat with pname in {"Code", "Google Chrome", "Safari", "Terminal", "Claude", "Feishu", "WeChat"}
+    repeat with pname in {"Google Chrome", "Safari", "Claude", "Feishu", "WeChat"}
         try
             tell process (pname as text)
                 repeat with w in windows
@@ -290,10 +285,6 @@ tell application "System Events"
             if (value of attribute "AXMinimized" of window 1) then
                 set value of attribute "AXMinimized" of window 1 to false
                 delay 0.5
-                tell window 1
-                    set position to {0, 25}
-                    set size to {screenW, screenH - 25}
-                end tell
                 return "RECOVERED"
             end if
         end try
@@ -445,6 +436,37 @@ def collect_accounts(main_ws):
                     if same_count >= 4:
                         break
 
+    # 兜底:虚拟滚动列表,最后几个账号常因 lazy render 漏读
+    # 强制滚到容器最底部,等 1.5s DOM 稳定再扫一次
+    js(main_ws, """
+    (function(){
+        var c = document.querySelector('[class*="menuMainWarpper"]');
+        if(c) c.scrollTop = c.scrollHeight;
+    })()
+    """, 113)
+    time.sleep(1.5)
+    v = js(main_ws, f"""
+    (function(){{
+        var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+        var names = [];
+        for(var i=0;i<items.length;i++){{
+            var t = items[i].textContent.trim();
+            if(t) names.push(t);
+        }}
+        return JSON.stringify(names);
+    }})()
+    """, 114)
+    if v:
+        names = json.loads(v)
+        added = 0
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                accounts.append(n)
+                added += 1
+        if added:
+            log(f"  兜底:滚到底再扫一次,补收 {added} 个账号(虚拟滚动 lazy render 漏发)")
+
     log(f"共收集到 {len(accounts)} 个账号")
     return accounts
 
@@ -577,7 +599,7 @@ def close_current_tab(main_ws):
 
 # ========== 发布流程（定时发布版） ==========
 
-def publish_article_timer(ws_url, doc_path, main_ws, account_name, timer_time):
+def publish_article_timer(ws_url, doc_path, main_ws, account_name, timer_time=None):
     """定时发布一篇文章，timer_time格式: YYYY-MM-DD HH:MM"""
     try:
         wsc = ws_connect(ws_url, timeout=10)
@@ -1083,6 +1105,126 @@ end tell
     else:
         log("  头条首发: 未找到复选框")
 
+    # ---- 立即/定时分支 fork ----
+    if timer_time is None:
+        # 点"预览并发布" + 等"确认发布"，最多重试5次（封面图加载慢时第一次点可能无效）
+        confirm_clicked = False
+        for attempt in range(5):
+            # 每次重新取 webview 屏幕坐标
+            wv_cur_r = js(main_ws, """
+            (function(){
+                var wvs = document.querySelectorAll('webview');
+                var maxArea = 0, best = null;
+                for(var i=0;i<wvs.length;i++){
+                    var r = wvs[i].getBoundingClientRect();
+                    var area = r.width * r.height;
+                    if(area > maxArea){ maxArea = area; best = r; }
+                }
+                if(!best) return null;
+                return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
+            })()
+            """, 79)
+            wv_cur = json.loads(wv_cur_r) if wv_cur_r else wv0
+    
+            # 找"预览并发布"按钮
+            v = js(wsc, """
+            (function(){
+                var btns = document.querySelectorAll('button');
+                for(var i=0;i<btns.length;i++){
+                    if(btns[i].textContent.trim() === '\u9884\u89c8\u5e76\u53d1\u5e03' && !btns[i].disabled){
+                        var r = btns[i].getBoundingClientRect();
+                        if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
+                    }
+                }
+                return null;
+            })()
+            """, 80)
+    
+            if not v:
+                if attempt == 0:
+                    wsc.close()
+                    return False, "找不到预览并发布按钮"
+            else:
+                p = json.loads(v)
+                preview_x = wv_cur['sx'] + p['x']
+                preview_y = wv_cur['sy'] + p['y']
+                attempt_str = f" [第{attempt+1}次]" if attempt > 0 else ""
+                log(f"  cliclick 点击预览并发布 ({preview_x},{preview_y}){attempt_str}")
+                subprocess.run(["cliclick", f"m:{preview_x},{preview_y}"], capture_output=True)
+                time.sleep(0.5)
+                subprocess.run(["cliclick", f"c:{preview_x},{preview_y}"], capture_output=True)
+                log("  已点击预览并发布")
+                time.sleep(4)
+    
+            # 等"确认发布"按钮
+            for i in range(60):
+                time.sleep(0.5)
+                v2 = js(wsc, """
+                (function(){
+                    var btns = document.querySelectorAll('button');
+                    for(var i=0;i<btns.length;i++){
+                        var t = btns[i].textContent.trim();
+                        if(t === '\u786e\u8ba4\u53d1\u5e03' || t.indexOf('\u786e\u8ba4\u53d1\u5e03') !== -1){
+                            var r = btns[i].getBoundingClientRect();
+                            if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
+                        }
+                    }
+                    return null;
+                })()
+                """, 83)
+                if v2:
+                    p2 = json.loads(v2)
+                    confirm_x = wv_cur['sx'] + p2['x']
+                    confirm_y = wv_cur['sy'] + p2['y']
+                    log(f"  cliclick 点击确认发布 ({confirm_x},{confirm_y})")
+                    subprocess.run(["cliclick", f"c:{confirm_x},{confirm_y}"], capture_output=True)
+                    confirm_clicked = True
+                    break
+    
+            if confirm_clicked:
+                break
+            if attempt < 4:
+                log(f"  确认发布未出现，封面图可能未加载完，准备第{attempt+2}次点击预览并发布...")
+    
+        if not confirm_clicked:
+            wsc.close()
+            return False, "未出现确认发布按钮"
+    
+        # 检测发布成功
+        published = False
+        for _ in range(20):
+            time.sleep(0.5)
+            t = js(wsc, """
+            (function(){
+                var all = document.querySelectorAll('*');
+                for(var i=0;i<all.length;i++){
+                    var t = all[i].textContent.trim();
+                    if((t==='发布成功！'||t==='发布成功'||t==='提交成功！'||t==='提交成功')
+                       && all[i].children.length<=1)
+                        return t;
+                }
+                return null;
+            })()
+            """, 96)
+            if t:
+                published = True
+                break
+            cur_url = js(wsc, "location.href", 97) or ""
+            if "graphic" in cur_url and "publish" not in cur_url:
+                published = True
+                break
+    
+        if not published:
+            err_after = detect_account_error(wsc)
+            wsc.close()
+            if err_after:
+                return False, err_after
+            return False, "未检测到发布成功"
+    
+        wsc.close()
+        log("  OK 立即发布成功")
+        return True, "成功"
+
     # ---- 定时发布流程 ----
     wv_cur = get_wv()
 
@@ -1484,6 +1626,137 @@ def move_to_sent(doc_path):
 
 # ========== 主流程 ==========
 
+# ========== Stage 2 死磕主循环 (定时模式补尾) ==========
+# 漏发账号在 Stage 1 跑完后,这里把它们在"now + 30min"重新排程,直到全部发完或命中 4 类硬终止
+# 4 类硬终止 = {失登, 封号, 禁言, 侧边栏未找到}
+
+def run_death_grip_timer(
+    accounts,
+    per_account_quota,       # dict[name -> 还需补几篇]
+    doc_pool,
+    main_ws,
+    sub_rounds=3,
+    max_fail_per_sub=3,
+    initial_dead=None,
+):
+    """
+    Stage 2: 用 publish_article_timer 立即模式 (timer_time=None) 补尾漏发账号——直接发，不再走定时排程。
+    - 4 类硬终止 → 立即写硬终止 sheet 永久放弃
+    - 其他失败 → 本小轮 max_fail_per_sub 次失败 → 跳本小轮(下小轮恢复)
+    - 大循环 N 小轮 + 外层无限磕,直到全发完 / 4 类硬终止 / Ctrl+C
+    """
+    HARD_TERMINATE_REASONS = {"失登", "封号", "禁言", "侧边栏未找到"}
+    _HARD_TERMINATE_HEADERS = ["账号名", "终止原因", "终止时间", "本次已发篇数"]
+    dead_terminated = dict(initial_dead) if initial_dead else {}
+    acc_count = {a: 0 for a in accounts}
+
+    def _append_hard_terminate(name, reason, count_so_far):
+        try:
+            wb = openpyxl.load_workbook(CONFIG_EXCEL)
+            if "硬终止账号" not in wb.sheetnames:
+                ws_h = wb.create_sheet("硬终止账号")
+                ws_h.append(_HARD_TERMINATE_HEADERS)
+            else:
+                ws_h = wb["硬终止账号"]
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ws_h.append([name, reason, ts, count_so_far])
+            wb.save(CONFIG_EXCEL)
+        except Exception:
+            pass
+
+    def _do_publish(name, doc):
+        log(f"\n  [Stage2 剩余 {len(doc_pool)} 篇] {name}  ->  {os.path.basename(doc)}")
+        pos = scroll_find_account(main_ws, name)
+        if not pos:
+            log(f"  X 未在侧边栏找到账号: {name}")
+            return False, "侧边栏未找到"
+        click(main_ws, pos["x"], pos["y"], 20)
+        time.sleep(WAIT_LOAD)
+
+        ws_url = find_account_webview(main_ws, name)
+        if not ws_url:
+            log("  X 找不到 webview")
+            close_current_tab(main_ws)
+            return False, "webview匹配失败"
+
+        try:
+            success, reason = publish_article_timer(ws_url, doc, main_ws, name)  # timer_time=None → 立即发布
+            if success:
+                if doc in doc_pool:
+                    doc_pool.remove(doc)
+                acc_count[name] = acc_count.get(name, 0) + 1
+                try:
+                    move_to_sent(doc)
+                except Exception:
+                    pass
+                return True, ""
+            else:
+                log(f"  X 发布失败: {reason}")
+                return False, reason
+        except Exception as e:
+            log(f"  X 异常: {e}")
+            return False, f"异常: {e}"
+        finally:
+            close_current_tab(main_ws)
+            _d = random.randint(8, 20)
+            log(f"  篇间等待 {_d} 秒...")
+            time.sleep(_d)
+
+    def _is_eligible(name, sub_skipped):
+        return (name not in dead_terminated and
+                name not in sub_skipped and
+                acc_count.get(name, 0) < per_account_quota.get(name, 0))
+
+    def _handle_fail(name, reason, sub_fail_count, sub_skipped):
+        if reason in HARD_TERMINATE_REASONS:
+            cnt = acc_count.get(name, 0)
+            dead_terminated[name] = (reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), cnt)
+            _append_hard_terminate(name, reason, cnt)
+            log(f"  ★ 4 类硬终止: {name} -> {reason}")
+            return True
+        sub_fail_count[name] = sub_fail_count.get(name, 0) + 1
+        if sub_fail_count[name] >= max_fail_per_sub:
+            sub_skipped.add(name)
+            log(f"  - {name} 本小轮 {max_fail_per_sub} 次失败,跳本小轮")
+        return False
+
+    big_round = 0
+    while True:
+        if not doc_pool:
+            log("\n[Stage2] 文档池已空,死磕结束")
+            break
+        active = [a for a in accounts
+                  if a not in dead_terminated
+                  and acc_count.get(a, 0) < per_account_quota.get(a, 0)]
+        if not active:
+            log("\n[Stage2] 所有账号已满 quota,死磕结束")
+            break
+        big_round += 1
+        log(f"\n{'='*20} [Stage2] 第 {big_round} 大循环 (active {len(active)},文档池 {len(doc_pool)}) {'='*20}")
+
+        for sub_idx in range(1, sub_rounds + 1):
+            log(f"\n----- [Stage2] 大{big_round}/小{sub_idx} -----")
+            sub_fail_count = {}
+            sub_skipped = set()
+            for name in list(accounts):
+                if not doc_pool:
+                    break
+                if not _is_eligible(name, sub_skipped):
+                    continue
+                doc = random.choice(doc_pool)
+                ok, reason = _do_publish(name, doc)
+                if not ok:
+                    _handle_fail(name, reason, sub_fail_count, sub_skipped)
+            log(f"\n[Stage2] 大{big_round}/小{sub_idx} 结束。本小轮跳过 {len(sub_skipped)},硬终止累计 {len(dead_terminated)}")
+
+    return {
+        "acc_count": acc_count,
+        "dead_terminated": dead_terminated,
+        "doc_pool": doc_pool,
+        "big_rounds": big_round,
+    }
+
+
 def main():
     _init_run_dir()
     log("=" * 50)
@@ -1510,37 +1783,6 @@ def main():
     main_ws = ws_connect(main_ws_url, timeout=10)
     log("已连接主窗口")
 
-    # 隐藏所有非罐头的可见应用 + 罐头按当前屏幕分辨率最大化（不写死像素，每台机子都适配）
-    subprocess.run(["osascript", "-e", '''
-tell application "Finder"
-    set sb to bounds of window of desktop
-    set screenW to item 3 of sb
-    set screenH to item 4 of sb
-end tell
-tell application "System Events"
-    repeat with p in (every process whose visible is true and background only is false)
-        set pname to name of p
-        if pname is not "创作罐头" and pname is not "罐头" and pname is not "Finder" then
-            try
-                set visible of p to false
-            end try
-        end if
-    end repeat
-end tell
-tell application "创作罐头" to activate
-delay 0.5
-tell application "System Events"
-    tell process "创作罐头"
-        set frontmost to true
-        tell window 1
-            set position to {0, 25}
-            set size to {screenW, screenH - 25}
-        end tell
-    end tell
-end tell
-'''], capture_output=True)
-    time.sleep(1.0)
-    log("已隐藏其他应用+罐头按屏幕分辨率最大化")
 
     # 账号来源：白名单第一优先，为空则从罐头左侧栏动态读
     skip = _read_skip_set()
@@ -1588,14 +1830,49 @@ end tell
         log(f"  → 文档已回池尾待后续重试: {os.path.basename(p)}")
         return True
 
+    # 4 类硬终止集合 + 硬终止账号字典(本次累计) + 写"硬终止账号"sheet
+    HARD_TERMINATE_REASONS = {"失登", "封号", "禁言", "侧边栏未找到"}
+    dead_terminated = {}  # name -> (reason, ts, count_so_far)
+    _HARD_TERMINATE_HEADERS = ["账号名", "终止原因", "终止时间", "本次已发篇数"]
+
+    def _append_hard_terminate(name, reason, count_so_far):
+        try:
+            wb = openpyxl.load_workbook(CONFIG_EXCEL)
+            if "硬终止账号" not in wb.sheetnames:
+                ws_h = wb.create_sheet("硬终止账号")
+                ws_h.append(_HARD_TERMINATE_HEADERS)
+            else:
+                ws_h = wb["硬终止账号"]
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ws_h.append([name, reason, ts, count_so_far])
+            wb.save(CONFIG_EXCEL)
+        except Exception:
+            pass
+
+    def _terminate(name, reason, doc_path):
+        cnt = success_by_acct.get(name, 0)
+        dead_terminated[name] = (reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), cnt)
+        _append_hard_terminate(name, reason, cnt)
+        log(f"  ★ 4 类硬终止: {name} -> {reason} (本次已发 {cnt} 篇,永久放弃)")
+        # 文档不 requeue,留池子让别的账号用
+        if doc_path and doc_path not in doc_pool:
+            doc_pool.append(doc_path)
+
     consecutive_fail = 0
-    MAX_CONSECUTIVE_FAIL = 3  # 连败熔断阈值
+    MAX_CONSECUTIVE_FAIL = 6  # 连败熔断阈值
+    COOLDOWN_AT = 3           # 连败到此值时,先 sleep 一段让罐头缓口气
+    COOLDOWN_SEC = 60
 
     for idx, (name, timer_time) in enumerate(tasks):
         log(f"\n{'='*40}")
         log(f"任务 {idx+1}/{len(tasks)}: {name}  →  {timer_time}")
 
-        # 从素材池顺序取一篇（非随机）
+        if name in dead_terminated:
+            log(f"  ★ 该账号已硬终止 ({dead_terminated[name][0]}),跳过本任务")
+            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, "", f"已硬终止/{dead_terminated[name][0]}"))
+            continue
+
+        # 从素材池顺序取一篇(非随机)
         if not doc_pool:
             log("  X 素材池已空")
             fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, "", "素材不足"))
@@ -1614,7 +1891,7 @@ end tell
             log(f"  X 未找到账号: {name}")
             fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), "侧边栏未找到"))
             fail_docs_by_acct.setdefault(name, []).append(os.path.basename(doc_path))
-            requeue_doc(doc_path)  # 账号问题，文档本身无辜
+            _terminate(name, "侧边栏未找到", doc_path)  # 4 类硬终止,不 requeue
             this_task_failed = True
             this_task_fail_reason = "侧边栏未找到"
         else:
@@ -1626,7 +1903,7 @@ end tell
                 log("  X 找不到 webview")
                 fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), "webview匹配失败"))
                 fail_docs_by_acct.setdefault(name, []).append(os.path.basename(doc_path))
-                requeue_doc(doc_path)
+                requeue_doc(doc_path)  # webview 不在 4 类,正常 requeue
                 close_current_tab(main_ws)
                 this_task_failed = True
                 this_task_fail_reason = "webview匹配失败"
@@ -1642,7 +1919,10 @@ end tell
                         log(f"  X 发布失败: {reason}")
                         fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), reason))
                         fail_docs_by_acct.setdefault(name, []).append(os.path.basename(doc_path))
-                        requeue_doc(doc_path)  # 状态问题居多，回池尾再给一次机会
+                        if reason in HARD_TERMINATE_REASONS:
+                            _terminate(name, reason, doc_path)
+                        else:
+                            requeue_doc(doc_path)
                         this_task_failed = True
                         this_task_fail_reason = reason
                 except Exception as e:
@@ -1668,6 +1948,9 @@ end tell
                 except Exception:
                     pass
                 break
+            if consecutive_fail >= COOLDOWN_AT:
+                log(f"  连败 {consecutive_fail} 次，先 sleep {COOLDOWN_SEC}s 等罐头缓过来再继续")
+                time.sleep(COOLDOWN_SEC)
         else:
             consecutive_fail = 0
 
@@ -1677,11 +1960,63 @@ end tell
             time.sleep(_d)
 
     write_fail_excel(fail_records)
-    _finalize_config(accounts_quota, success_by_acct, fail_docs_by_acct)
-
-    main_ws.close()
     log(f"\n{'='*50}")
-    log(f"完成! 成功:{success_count}  失败:{len(fail_records)}")
+    log(f"Stage 1 (定时排程) 完成! 成功:{success_count}  失败:{len(fail_records)}  硬终止:{len(dead_terminated)}")
+    log(f"{'='*50}")
+
+    # ========== Stage 2:死磕补尾 (自动衔接) ==========
+    # 漏发账号(quota - 已发) 通过 publish_article_timer 排程到 now+30min,串行死磕
+    remaining_quota = {}
+    remaining_accounts = []
+    for name, q in accounts_quota:
+        if name in dead_terminated:
+            continue
+        sent = success_by_acct.get(name, 0)
+        if sent < q:
+            remaining_quota[name] = q - sent
+            remaining_accounts.append(name)
+
+    if remaining_accounts and doc_pool:
+        log(f"\n{'#'*60}")
+        log(f"# Stage 2 启动:死磕补尾,{len(remaining_accounts)} 个账号待补,文档池剩 {len(doc_pool)} 篇")
+        log(f"# 漏发账号立即发布（不走定时），死磕直到全部成功 / 4 类硬终止 / Ctrl+C")
+        log(f"# 直到全部排程成功 / 命中 4 类硬终止 / 你 Ctrl+C")
+        log(f"{'#'*60}")
+        try:
+            stage2 = run_death_grip_timer(
+                accounts=remaining_accounts,
+                per_account_quota=remaining_quota,
+                doc_pool=doc_pool,
+                main_ws=main_ws,
+                sub_rounds=3,
+                max_fail_per_sub=3,
+                initial_dead=dead_terminated,
+            )
+            stage2_dead = stage2.get("dead_terminated", {})
+            new_dead = {n: v for n, v in stage2_dead.items() if n not in dead_terminated}
+            dead_terminated.update(stage2_dead)
+            stage2_added = sum(stage2.get("acc_count", {}).values())
+            for n, v in stage2.get("acc_count", {}).items():
+                if v > 0:
+                    success_by_acct[n] = success_by_acct.get(n, 0) + v
+            log(f"\nStage 2 完成: 新增成功 {stage2_added} 篇,新增硬终止 {len(new_dead)} 个")
+        except KeyboardInterrupt:
+            log(f"\n!! Stage 2 被人工 Ctrl+C 中断")
+    elif not remaining_accounts:
+        log("\n★ Stage 1 全部账号已达 quota 或硬终止,无需 Stage 2")
+    else:
+        log("\n★ Stage 1 结束时文档池已空,Stage 2 无文档可发")
+
+    _finalize_config(accounts_quota, success_by_acct, fail_docs_by_acct)
+    main_ws.close()
+
+    if dead_terminated:
+        log(f"\n★★ 4 类硬终止账号 {len(dead_terminated)} 个 (已写入'硬终止账号'sheet,需人工处理):")
+        for d_name, (d_reason, d_ts, d_cnt) in dead_terminated.items():
+            log(f"  - {d_name}\t{d_reason}\t本次已发 {d_cnt} 篇\t{d_ts}")
+
+    log(f"\n{'='*50}")
+    log(f"全流程完成! 总成功:{sum(success_by_acct.values())}  Stage1失败:{len(fail_records)}  硬终止:{len(dead_terminated)}")
     log(f"{'='*50}")
 
 
