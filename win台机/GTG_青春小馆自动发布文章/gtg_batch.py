@@ -21,7 +21,7 @@ import shutil
 import glob
 import sys
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import docx as docxlib
 import ctypes
 import openpyxl
@@ -81,9 +81,14 @@ def _init_run_dir():
 # ========== 账号配置 Excel ==========
 
 CONFIG_EXCEL  = os.path.join(BASE_DIR, "账号配置.xlsx")
-_EXCEL_SHEETS = ["不首发", "永久跳过", "本轮已发", "白名单", "失败列表", "发文汇总"]
+SUMMARY_EXCEL = os.path.join(BASE_DIR, "发文汇总.xlsx")
+_EXCEL_SHEETS = ["不首发", "永久跳过", "本轮已发", "白名单", "失败列表", "硬终止账号"]
 _FAIL_HEADERS    = ["账号名", "失败原因", "文稿名", "失败时间", "轮次"]
 _SUMMARY_HEADERS = ["账号名", "轮次", "发文时间", "失败时间", "补发成功时间"]
+_HARD_TERMINATE_HEADERS = ["账号名", "终止原因", "终止时间", "本次已发篇数"]
+
+# 4 类硬终止 reason — 命中即永久放弃,不再尝试
+HARD_TERMINATE_REASONS = {"失登", "封号", "禁言", "侧边栏未找到"}
 
 def _ensure_config_excel():
     if not os.path.exists(CONFIG_EXCEL):
@@ -93,8 +98,10 @@ def _ensure_config_excel():
             ws_new = wb.create_sheet(sh)
             if sh == "失败列表":
                 ws_new.append(_FAIL_HEADERS)
-            elif sh == "发文汇总":
-                ws_new.append(_SUMMARY_HEADERS)
+            elif sh == "硬终止账号":
+                ws_new.append(_HARD_TERMINATE_HEADERS)
+            elif sh == "白名单":
+                ws_new.append(["账号名", "发文份数"])
             else:
                 ws_new.append(["账号名"])
         wb.save(CONFIG_EXCEL)
@@ -105,11 +112,23 @@ def _ensure_config_excel():
         if "失败列表" not in wb.sheetnames:
             ws_n = wb.create_sheet("失败列表")
             ws_n.append(_FAIL_HEADERS); dirty = True
-        if "发文汇总" not in wb.sheetnames:
-            ws_n = wb.create_sheet("发文汇总")
-            ws_n.append(_SUMMARY_HEADERS); dirty = True
+        if "硬终止账号" not in wb.sheetnames:
+            ws_n = wb.create_sheet("硬终止账号")
+            ws_n.append(_HARD_TERMINATE_HEADERS); dirty = True
         if dirty:
             wb.save(CONFIG_EXCEL)
+    except Exception:
+        pass
+
+def _ensure_summary_excel():
+    if os.path.exists(SUMMARY_EXCEL):
+        return
+    try:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "发文汇总"
+        ws.append(_SUMMARY_HEADERS)
+        wb.save(SUMMARY_EXCEL)
     except Exception:
         pass
 
@@ -211,13 +230,11 @@ def _append_summary(name, round_num, event_type, ts=None):
     if col is None:
         return
     try:
-        _ensure_config_excel()
-        wb = openpyxl.load_workbook(CONFIG_EXCEL)
-        if "发文汇总" not in wb.sheetnames:
-            ws_s = wb.create_sheet("发文汇总")
+        _ensure_summary_excel()
+        wb = openpyxl.load_workbook(SUMMARY_EXCEL)
+        ws_s = wb["发文汇总"] if "发文汇总" in wb.sheetnames else wb.create_sheet("发文汇总")
+        if ws_s.max_row == 0:
             ws_s.append(_SUMMARY_HEADERS)
-        else:
-            ws_s = wb["发文汇总"]
         target_row = None
         for r_idx in range(2, ws_s.max_row + 1):
             a = ws_s.cell(r_idx, 1).value
@@ -229,7 +246,7 @@ def _append_summary(name, round_num, event_type, ts=None):
             ws_s.append([name, round_num, "", "", ""])
             target_row = ws_s.max_row
         ws_s.cell(target_row, col, ts)
-        wb.save(CONFIG_EXCEL)
+        wb.save(SUMMARY_EXCEL)
     except Exception:
         pass
 
@@ -249,9 +266,9 @@ def _clear_round_sheets():
 
 def _sort_summary_by_account():
     try:
-        if not os.path.exists(CONFIG_EXCEL):
+        if not os.path.exists(SUMMARY_EXCEL):
             return
-        wb = openpyxl.load_workbook(CONFIG_EXCEL)
+        wb = openpyxl.load_workbook(SUMMARY_EXCEL)
         if "发文汇总" not in wb.sheetnames:
             wb.close(); return
         ws_s = wb["发文汇总"]
@@ -265,9 +282,54 @@ def _sort_summary_by_account():
             ws_s.delete_rows(2, ws_s.max_row - 1)
         for row in data:
             ws_s.append(row)
+        wb.save(SUMMARY_EXCEL)
+    except Exception:
+        pass
+
+
+# ========== 硬终止账号 sheet ==========
+
+def _append_hard_terminate(name, reason, count_so_far):
+    """命中 4 类硬终止时,写入"硬终止账号"sheet。永久放弃,不再尝试。"""
+    try:
+        _ensure_config_excel()
+        wb = openpyxl.load_workbook(CONFIG_EXCEL)
+        if "硬终止账号" not in wb.sheetnames:
+            ws_h = wb.create_sheet("硬终止账号")
+            ws_h.append(_HARD_TERMINATE_HEADERS)
+        else:
+            ws_h = wb["硬终止账号"]
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws_h.append([name, reason, ts, count_so_far])
         wb.save(CONFIG_EXCEL)
     except Exception:
         pass
+
+def _read_whitelist_with_quota():
+    """读白名单 A 列+B 列。返回 [(name, quota), ...]，B 列空默认 1"""
+    if not os.path.exists(CONFIG_EXCEL):
+        return []
+    try:
+        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
+        if "白名单" not in wb.sheetnames:
+            wb.close(); return []
+        ws_r = wb["白名单"]
+        result = []
+        for row in ws_r.iter_rows(min_row=2, max_col=2, values_only=True):
+            if not row or not row[0]: continue
+            name = str(row[0]).strip()
+            if not name or name.startswith('#'): continue
+            q = 1
+            if len(row) > 1 and row[1] is not None:
+                try:
+                    q = max(1, int(row[1]))
+                except Exception:
+                    q = 1
+            result.append((name, q))
+        wb.close()
+        return result
+    except Exception:
+        return []
 
 # ========== 日志 ==========
 
@@ -278,6 +340,34 @@ def log(msg):
     sys.stdout.buffer.flush()
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+# ========== 状态文件 (实时刷新) ==========
+
+STATUS_FILE = os.path.join(BASE_DIR, "当前状态.txt")
+
+def write_status(big_round=None, sub_round=None, phase=None,
+                 total_done=0, total_target=0, doc_pool_size=0,
+                 sub_failed=0, dead_terminated=None, extra=""):
+    """实时刷新状态文件,你随时打开就能看到当前进度"""
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"[更新于 {ts}]"]
+        if big_round is not None:
+            lines.append(f"当前: 第 {big_round} 大循环 / 第 {sub_round} 小轮 / {phase}")
+        lines.append(f"累计已发: {total_done} / {total_target} 篇")
+        lines.append(f"文档池剩余: {doc_pool_size} 篇")
+        if sub_failed:
+            lines.append(f"本小轮失败队列: {sub_failed} 个账号")
+        dead_terminated = dead_terminated or {}
+        lines.append(f"硬终止: {len(dead_terminated)} 个" +
+                     (f" {list(dead_terminated.keys())}" if dead_terminated else ""))
+        if extra:
+            lines.append(extra)
+        with open(STATUS_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
 
 
 # ========== 失败记录 Excel ==========
@@ -434,7 +524,7 @@ def get_available_tags(main_ws):
         log("  警告: 未能打开筛选面板，跳过标签读取")
         return []
 
-    tags_raw = js(main_ws, """
+    tags_raw = js(main_ws, r"""
     (function(){
         var SKIP = ['全部','确定','取消','清除','清除筛选','确认','搜索','标签','分组',
                     '账号类型','平台','状态','按名称','排序','筛选'];
@@ -780,12 +870,17 @@ def get_url_from_ws(ws_url):
 def check_system_notice(ws_url, account_name):
     """
     导航到消息中心 → 分别点击系统通知、审核通知频道
-    → 只读取当天的消息原文写入 NOTICE_FILE
+    → 读取当天+昨天的消息原文，识别违规关键词
+    → 通知写入 NOTICE_FILE；违规写入 VIOLATION_FILE
+    → 返回 (notice_count, violation_count)
     """
     try:
         today = datetime.now()
-        today_full = today.strftime("%Y-%m-%d")
+        yesterday = today - timedelta(days=1)
+        today_full  = today.strftime("%Y-%m-%d")
         today_short = today.strftime("%m-%d")
+        yest_full   = yesterday.strftime("%Y-%m-%d")
+        yest_short  = yesterday.strftime("%m-%d")
 
         wsc = ws_connect(ws_url, timeout=8)
         js(wsc, "location.href='https://mp.toutiao.com/profile_v4/personal/message?type=message_letter'", 300)
@@ -796,7 +891,7 @@ def check_system_notice(ws_url, account_name):
         notices = []
 
         for channel in ["系统通知", "审核通知"]:
-            channel_json = channel.replace('"', '\"')
+            channel_json = channel.replace('"', '\\"')
             clicked = js(wsc, f"""
             (function(){{
                 var spans = document.querySelectorAll('span.name');
@@ -818,22 +913,23 @@ def check_system_notice(ws_url, account_name):
 
             result = js(wsc, f"""
             (function(){{
-                var todayFull = "{today_full}";
-                var todayShort = "{today_short}";
+                var keys = ["{today_full}","{today_short}","{yest_full}","{yest_short}"];
                 var list = document.querySelector('.chat-container-list');
                 if(!list) return JSON.stringify([]);
                 var items = list.children;
                 var results = [];
-                var isToday = false;
+                var matched = false;
                 for(var i=0;i<items.length;i++){{
                     var cls = items[i].className || '';
                     if(cls.indexOf('time-stamp') !== -1){{
                         var t = items[i].textContent.trim();
-                        isToday = t.startsWith(todayFull) || t.startsWith(todayShort);
-                    }} else if(isToday && cls.indexOf('chat-row') !== -1){{
+                        matched = false;
+                        for(var k=0;k<keys.length;k++){{
+                            if(t.indexOf(keys[k]) !== -1){{ matched = true; break; }}
+                        }}
+                    }} else if(matched && cls.indexOf('chat-row') !== -1){{
                         var txt = items[i].textContent.trim();
-                        if(txt) results.push(txt.substring(0, 300));
-                        isToday = false;
+                        if(txt) results.push(txt.substring(0, 500));
                     }}
                 }}
                 return JSON.stringify(results);
@@ -844,25 +940,49 @@ def check_system_notice(ws_url, account_name):
                 try:
                     msgs = json.loads(result)
                     for msg in msgs:
-                        notices.append(f"【{{channel}}】{{msg}}")
-                except:
+                        notices.append((channel, msg))
+                except Exception:
                     pass
 
         wsc.close()
 
+        violations = []
+        for ch, msg in notices:
+            hit_cats = []
+            for cat, kws in VIOLATION_KEYWORDS.items():
+                for kw in kws:
+                    if kw in msg:
+                        hit_cats.append(cat)
+                        break
+            if hit_cats:
+                violations.append((ch, msg, hit_cats))
+
         if notices:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-            content_str = f"[{{ts}}] 账号 {{account_name}} 当天通知:\n"
-            for n in notices:
-                content_str += f"  {{n}}\n"
+            content_str = f"[{ts}] 账号 {account_name} 近两天通知 {len(notices)} 条:\n"
+            for ch, msg in notices:
+                content_str += f"  【{ch}】{msg}\n"
             content_str += "\n"
             with open(NOTICE_FILE, "a", encoding="utf-8") as f:
                 f.write(content_str)
-            log(f"  ⚠ 当天通知 {{len(notices)}} 条 → 已写入 {{NOTICE_FILE}}")
+            log(f"  ⚠ 近两天通知 {len(notices)} 条 → 已写入系统通知.txt")
         else:
-            log("  系统/审核通知: 当天无新通知")
+            log("  系统/审核通知: 近两天无新通知")
+
+        if violations:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            vstr = f"[{ts}] 账号 {account_name} 命中违规 {len(violations)} 条:\n"
+            for ch, msg, cats in violations:
+                vstr += f"  【{ch}】[{','.join(cats)}] {msg}\n"
+            vstr += "\n"
+            with open(VIOLATION_FILE, "a", encoding="utf-8") as f:
+                f.write(vstr)
+            log(f"  ★★ 违规命中 {len(violations)} 条 → 已写入违规提醒.txt")
+
+        return len(notices), len(violations)
     except Exception as e:
         log(f"  系统通知检测出错: {e}")
+        return 0, 0
 
 # ========== 阅读量检测 ==========
 
@@ -904,7 +1024,7 @@ def check_reading_stats(ws_url, account_name):
         reads = json.loads(reads_raw) if reads_raw else []
         if not reads:
             log("  阅读量: 未读取到数据")
-            return
+            return 0
 
         counts = [r['count'] for r in reads]
         log(f"  阅读量: {counts}")
@@ -917,9 +1037,11 @@ def check_reading_stats(ws_url, account_name):
             msg = '\n'.join(lines) + '\n\n'
             with open(ALERT_FILE, "a", encoding="utf-8") as f:
                 f.write(msg)
-            log(f"  ★ 高阅读量提醒: {[r['count'] for r in high]} → 已写入 {ALERT_FILE}")
+            log(f"  ★ 高阅读量提醒: {[r['count'] for r in high]} → 已写入高阅读提醒.txt")
+        return len(high)
     except Exception as e:
         log(f"  阅读量检测出错: {e}")
+        return 0
 
 
 # ========== 账号状态检测 ==========
@@ -994,7 +1116,7 @@ def read_docx_text(doc_path):
 
 # ========== 发布流程 ==========
 
-def publish_article(ws_url, doc_path, main_ws, name=""):
+def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None):
 
     try:
         wsc = ws_connect(ws_url, timeout=10)
@@ -1257,7 +1379,20 @@ def publish_article(ws_url, doc_path, main_ws, name=""):
     })()
     """, 78)
     credit_score = int(credit_raw) if credit_raw is not None else None
-    log(f"  信用分: {credit_score if credit_score is not None else '未读取到'}")
+    if credit_score is not None:
+        alert = ""
+        if credit_score < 80:
+            alert = " ★★ 危险"
+        elif credit_score < 90:
+            alert = " ★ 警告"
+        log(f"  信用分: {credit_score}{alert}")
+    else:
+        log("  信用分: 未读取到")
+    if _credit_out is not None:
+        try:
+            _credit_out[name] = credit_score
+        except Exception:
+            pass
     should_first = (credit_score is not None and credit_score >= 95) and (name not in NOFIRST_ACCOUNTS)
 
     # 根据信用分设置头条首发复选框
@@ -1454,6 +1589,237 @@ def move_to_sent(doc_path):
     log(f"  已移至已发送: {os.path.basename(dest)}")
 
 
+# ========== 死磕主循环 (公共函数,timer.py 也调) ==========
+
+def run_death_grip(
+    accounts,                  # list[str] 账号顺序
+    per_account_quota,         # dict[str, int]  每个账号本次目标 quota
+    doc_pool,                  # list[str]       文档路径(会被 mutate,跑完是剩余)
+    main_ws,                   # 主窗口 ws_connection
+    sub_rounds=3,              # 1 大循环 = N 小轮(微头条 5,文章/定时 3)
+    max_fail_per_sub=3,        # 本小轮内允许的失败次数
+    sent_accounts_set=None,    # 中断恢复用,本轮已发
+    credit_records=None,       # 信用分累积(dict,引用)
+    initial_acc_count=None,    # 起步已发数(timer Stage 1 残余)
+    initial_dead=None,         # 起步硬终止(timer Stage 1 已识别)
+    log_label="",              # 日志前缀(用于区分 timer Stage 2 vs 普通 batch)
+):
+    """死磕循环:大循环 N 小轮 + 外层无限磕。
+    - 4 类硬终止(失登/封号/禁言/侧边栏未找到) → 即刻永久放弃,写"硬终止账号"sheet
+    - 其他失败 → 本小轮内累计 max_fail_per_sub 次跳过本小轮,下小轮恢复
+    - N 小轮跑完 = 1 大循环;还有 quota 没满且 doc 没空 → 继续下一大循环(无限磕)
+    返回: dict { acc_count, dead_terminated, doc_pool, ok_count, fail_count, total_notices, total_violations, total_alerts }
+    """
+    sent_accounts_set = sent_accounts_set if sent_accounts_set is not None else set()
+    credit_records   = credit_records if credit_records is not None else {}
+    acc_count        = dict(initial_acc_count) if initial_acc_count else {}
+    for a in accounts:
+        acc_count.setdefault(a, 0)
+    dead_terminated  = dict(initial_dead) if initial_dead else {}
+
+    ok_count = fail_count = 0
+    total_notices = total_violations = total_alerts = 0
+    big_round = 0
+
+    def _do_publish(name, doc, round_label, is_retry=False):
+        nonlocal ok_count, fail_count, total_notices, total_violations, total_alerts
+        log(f"\n  {log_label}[剩余 {len(doc_pool)} 篇] {round_label} {'[补发]' if is_retry else ''} {name}  ->  {os.path.basename(doc)}")
+
+        pos = scroll_find_account(main_ws, name)
+        if not pos:
+            log(f"  X 未找到账号: {name}")
+            log_failure(name, "侧边栏未找到")
+            fail_count += 1
+            return False, "侧边栏未找到"
+
+        log(f"  点击坐标({pos['x']},{pos['y']})")
+        click(main_ws, pos["x"], pos["y"], 20)
+        time.sleep(WAIT_LOAD)
+
+        ws_url = find_account_webview(main_ws, name)
+        if not ws_url:
+            log("  X 找不到 webview")
+            log_failure(name, "webview匹配失败")
+            fail_count += 1
+            close_current_tab(main_ws)
+            return False, "webview匹配失败"
+
+        page_url = get_url_from_ws(ws_url)
+        if "login" in page_url:
+            log("  X 账号失登")
+            log_failure(name, "失登")
+            fail_count += 1
+            close_current_tab(main_ws)
+            return False, "失登"
+
+        _nc, _vc = check_system_notice(ws_url, name)
+        total_notices += _nc
+        total_violations += _vc
+        time.sleep(2)
+
+        _d_wait = random.randint(8, 20)
+        try:
+            success, reason = publish_article(ws_url, doc, main_ws, name=name, _credit_out=credit_records)
+            if success:
+                move_to_sent(doc)
+                if doc in doc_pool:
+                    doc_pool.remove(doc)
+                acc_count[name] = acc_count.get(name, 0) + 1
+                ok_count += 1
+                _a = check_reading_stats(ws_url, name)
+                total_alerts += (_a or 0)
+                return True, ""
+            else:
+                log(f"  X 发布失败: {reason}")
+                log_failure(name, reason)
+                fail_count += 1
+                return False, reason
+        except Exception as e:
+            log(f"  X 异常: {e}")
+            log_failure(name, f"异常: {e}")
+            fail_count += 1
+            return False, f"异常: {e}"
+        finally:
+            close_current_tab(main_ws)
+            log(f"  篇间等待 {_d_wait} 秒...")
+            time.sleep(_d_wait)
+
+    def _is_eligible(name, sub_skipped):
+        return (name not in dead_terminated and
+                name not in sub_skipped and
+                name not in sent_accounts_set and
+                acc_count.get(name, 0) < per_account_quota.get(name, 0))
+
+    def _handle_failure(name, reason, sub_fail_count, sub_skipped):
+        """处理 _do_publish 返回的失败。命中 4 类硬终止即永久放弃。"""
+        if reason in HARD_TERMINATE_REASONS:
+            cnt_so_far = acc_count.get(name, 0)
+            dead_terminated[name] = (reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), cnt_so_far)
+            _append_hard_terminate(name, reason, cnt_so_far)
+            log(f"  ★ 4 类硬终止: {name} -> {reason} (本次已发 {cnt_so_far} 篇,永久放弃)")
+            return True
+        sub_fail_count[name] = sub_fail_count.get(name, 0) + 1
+        if sub_fail_count[name] >= max_fail_per_sub:
+            sub_skipped.add(name)
+            log(f"  - {name} 本小轮 {max_fail_per_sub} 次失败,跳过本小轮(下小轮恢复)")
+        return False
+
+    def _total_target():
+        return sum(per_account_quota.get(a, 0) for a in accounts if a not in dead_terminated)
+
+    def _total_done():
+        return sum(acc_count.get(a, 0) for a in accounts)
+
+    while True:
+        # 进大循环前先检查
+        if not doc_pool:
+            log(f"\n{log_label}文档池已空,死磕结束")
+            break
+        active = [a for a in accounts
+                  if a not in dead_terminated
+                  and acc_count.get(a, 0) < per_account_quota.get(a, 0)]
+        if not active:
+            log(f"\n{log_label}所有账号都已满 quota,死磕结束")
+            break
+
+        big_round += 1
+        log(f"\n{'='*20} {log_label}第 {big_round} 大循环 开始 (active {len(active)} 账号,文档池 {len(doc_pool)} 篇) {'='*20}")
+
+        for sub_idx in range(1, sub_rounds + 1):
+            log(f"\n----- {log_label}第 {big_round} 大循环 / 第 {sub_idx} 小轮 (Phase A) -----")
+            sub_fail_count = {}
+            sub_skipped = set()
+            sub_round_id = big_round * 100 + sub_idx  # 用于 sheet 标记
+
+            # ----- Phase A: 每个未达 quota 的账号发 1 篇 -----
+            for name in list(accounts):
+                if not doc_pool:
+                    log(f"  Phase A 中文档池已空,提前结束")
+                    break
+                if not _is_eligible(name, sub_skipped):
+                    continue
+                doc = random.choice(doc_pool)
+                round_label = f"[大{big_round}/小{sub_idx}/A]"
+                write_status(big_round, sub_idx, "Phase A",
+                             total_done=_total_done(), total_target=_total_target(),
+                             doc_pool_size=len(doc_pool),
+                             sub_failed=len(sub_skipped), dead_terminated=dead_terminated)
+                success, reason = _do_publish(name, doc, round_label, is_retry=False)
+                if success:
+                    sent_accounts_set.add(name)
+                    _append_sent_excel(name)
+                    _append_summary(name, sub_round_id, "发文时间")
+                else:
+                    _append_fail_list(name, reason, os.path.basename(doc), sub_round_id)
+                    _append_summary(name, sub_round_id, "失败时间")
+                    _handle_failure(name, reason, sub_fail_count, sub_skipped)
+
+            # ----- Phase B: 重试本小轮 fail_list 内未硬终止的 -----
+            phase_b_round = 0
+            while phase_b_round < max_fail_per_sub and doc_pool:
+                phase_b_round += 1
+                pending = [f for f in _read_fail_list()
+                           if f[4] == sub_round_id
+                           and f[0] not in sent_accounts_set
+                           and f[0] not in dead_terminated
+                           and f[0] not in sub_skipped]
+                if not pending:
+                    log(f"  Phase B: 失败列表已清空,本小轮齐活")
+                    break
+                log(f"\n  {log_label}Phase B 第 {phase_b_round}/{max_fail_per_sub} 次, 待补 {len(pending)} 个")
+                for f_name, f_reason, f_docname, f_ts, f_rnd in pending:
+                    if not _is_eligible(f_name, sub_skipped):
+                        continue
+                    doc_path = None
+                    for d in doc_pool:
+                        if os.path.basename(d) == f_docname:
+                            doc_path = d
+                            break
+                    if doc_path is None:
+                        if not doc_pool:
+                            break
+                        doc_path = random.choice(doc_pool)
+                    round_label = f"[大{big_round}/小{sub_idx}/B-{phase_b_round}]"
+                    write_status(big_round, sub_idx, f"Phase B-{phase_b_round}",
+                                 total_done=_total_done(), total_target=_total_target(),
+                                 doc_pool_size=len(doc_pool),
+                                 sub_failed=len(sub_skipped), dead_terminated=dead_terminated)
+                    success, reason = _do_publish(f_name, doc_path, round_label, is_retry=True)
+                    if success:
+                        sent_accounts_set.add(f_name)
+                        _append_sent_excel(f_name)
+                        _remove_from_fail_list(f_name)
+                        _append_summary(f_name, sub_round_id, "补发成功时间")
+                        log(f"  ✓ 补发成功: {f_name}")
+                    else:
+                        _handle_failure(f_name, reason, sub_fail_count, sub_skipped)
+
+            # ----- 小轮收尾:本小轮的临时跳过名单清空,下小轮全员可再尝试 -----
+            log(f"\n{log_label}第 {big_round} 大循环 / 第 {sub_idx} 小轮 结束。本小轮跳过 {len(sub_skipped)} 个(下小轮恢复)。硬终止累计 {len(dead_terminated)} 个")
+            sent_accounts_set.clear()
+            _clear_round_sheets()
+
+        log(f"\n{'='*20} {log_label}第 {big_round} 大循环 结束 {'='*20}")
+
+    write_status(big_round, sub_rounds, "结束",
+                 total_done=_total_done(), total_target=_total_target(),
+                 doc_pool_size=len(doc_pool),
+                 sub_failed=0, dead_terminated=dead_terminated,
+                 extra=f"{log_label}{big_round} 大循环跑完。最终硬终止 {len(dead_terminated)} 个")
+
+    return {
+        "acc_count": acc_count,
+        "dead_terminated": dead_terminated,
+        "doc_pool": doc_pool,
+        "ok_count": ok_count,
+        "fail_count": fail_count,
+        "total_notices": total_notices,
+        "total_violations": total_violations,
+        "total_alerts": total_alerts,
+        "big_rounds": big_round,
+    }
+
+
 # ========== 主流程 ==========
 
 def main():
@@ -1534,14 +1900,29 @@ def main():
         if skipped:
             log(f"已排除 {skipped} 个永不发文账号: {EXCLUDE_ACCOUNTS}")
 
-    # 读取账号配置.xlsx - 白名单sheet（有内容则只跑白名单内的账号）
-    try:
-        _include = _read_excel_sheet("白名单")
-        if _include:
-            accounts = [a for a in accounts if any(inc in a or a in inc for inc in _include)]
-            log(f"账号配置.xlsx[白名单]已加载，白名单 {len(_include)} 个，过滤后剩 {len(accounts)} 个账号")
-    except Exception as _e:
-        log(f"读取账号配置.xlsx[白名单]失败: {_e}")
+    # per_account_quota: 本次每个账号要发几篇
+    per_account_quota = {}
+
+    # 正常模式：读"白名单"A 列（账号名）+ B 列（可选配额）
+    whitelist_with_q = _read_whitelist_with_quota()
+    if whitelist_with_q:
+        wl_map = {n: q for n, q in whitelist_with_q}
+        accounts = [a for a in accounts if any(wn in a or a in wn for wn in wl_map)]
+        log(f"账号配置.xlsx[白名单]已加载，白名单 {len(wl_map)} 个，过滤后剩 {len(accounts)} 个账号")
+        default_q = max(1, len(docs) // len(accounts)) if accounts else 1
+        for a in accounts:
+            matched_q = None
+            for wn, wq in wl_map.items():
+                if wn in a or a in wn:
+                    matched_q = wq
+                    break
+            per_account_quota[a] = matched_q if matched_q is not None else default_q
+    else:
+        default_q = max(1, len(docs) // len(accounts)) if accounts else 1
+        for a in accounts:
+            per_account_quota[a] = default_q
+    total_target = sum(per_account_quota.values())
+    log(f"本次发布: {len(accounts)} 个账号，{len(docs)} 篇文档，配额合计 {total_target}")
 
     if not accounts:
         log("错误: 未找到任何账号，请检查创作罐头是否正常登录")
@@ -1549,179 +1930,83 @@ def main():
         os.system("pause")
         return
 
-    # 轮转分配：配额 = 总篇数 ÷ 账号数，每账号发配额篇，随机抽文章
-    quota = len(docs) // len(accounts) if len(accounts) > 0 else 1
-    quota = max(quota, 1)
-    log(f"本次发布: {len(accounts)} 个账号，{len(docs)} 篇文档，每账号配额 {quota} 篇")
-
     doc_pool = list(docs)
-    acc_count = {a: 0 for a in accounts}
-    acc_fail_count = {}
-    skipped_accounts = []
-    MAX_ACC_RETRY = 5
-    ok_count = fail_count = 0
-    round_num = 0
+    credit_records = {}
 
-    MAX_RETRY_PER_ROUND = 3
+    # 调用死磕主循环 (3 小轮 / 大循环 + 外层无限磕)
+    result = run_death_grip(
+        accounts=accounts,
+        per_account_quota=per_account_quota,
+        doc_pool=doc_pool,
+        main_ws=main_ws,
+        sub_rounds=3,
+        max_fail_per_sub=3,
+        sent_accounts_set=sent_accounts_set,
+        credit_records=credit_records,
+    )
 
-    def _do_publish(name, doc, current_round, is_retry=False):
-        """发一篇的完整流程。返回 (success:bool, reason:str)"""
-        nonlocal ok_count, fail_count
-        log(f"\n  [剩余 {len(doc_pool)} 篇]  {'[补发]' if is_retry else ''} {name}  ->  {os.path.basename(doc)}")
-
-        pos = scroll_find_account(main_ws, name)
-        if not pos:
-            log(f"  X 未找到账号: {name}")
-            log_failure(name, "侧边栏未找到")
-            fail_count += 1
-            acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-            return False, "侧边栏未找到"
-
-        log(f"  点击坐标({pos['x']},{pos['y']})")
-        click(main_ws, pos["x"], pos["y"], 20)
-        time.sleep(WAIT_LOAD)
-
-        ws_url = find_account_webview(main_ws, name)
-        if not ws_url:
-            log("  X 找不到 webview")
-            log_failure(name, "webview匹配失败")
-            fail_count += 1
-            acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-            close_current_tab(main_ws)
-            return False, "webview匹配失败"
-
-        page_url = get_url_from_ws(ws_url)
-        if "login" in page_url:
-            log("  X 账号失登")
-            log_failure(name, "失登")
-            fail_count += 1
-            acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-            close_current_tab(main_ws)
-            return False, "失登"
-
-        check_system_notice(ws_url, name)
-        time.sleep(2)
-
-        _d_wait = random.randint(8, 20)
-        try:
-            success, reason = publish_article(ws_url, doc, main_ws, name=name)
-            if success:
-                acc_fail_count.pop(name, None)
-                move_to_sent(doc)
-                if doc in doc_pool:
-                    doc_pool.remove(doc)
-                acc_count[name] = acc_count.get(name, 0) + 1
-                ok_count += 1
-                check_reading_stats(ws_url, name)
-                return True, ""
-            else:
-                log(f"  X 发布失败: {reason}")
-                log_failure(name, reason)
-                fail_count += 1
-                acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-                return False, reason
-        except Exception as e:
-            log(f"  X 异常: {e}")
-            log_failure(name, f"异常: {e}")
-            fail_count += 1
-            acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-            return False, f"异常: {e}"
-        finally:
-            close_current_tab(main_ws)
-            log(f"  篇间等待 {_d_wait} 秒...")
-            time.sleep(_d_wait)
-
-    while doc_pool and any(v < quota for v in acc_count.values()):
-        round_num += 1
-        round_accounts = [a for a in accounts if acc_count.get(a, 0) < quota and a not in skipped_accounts and a not in sent_accounts_set]
-        if not round_accounts:
-            break
-        if len(doc_pool) < len(round_accounts):
-            round_accounts = round_accounts[:len(doc_pool)]
-
-        log(f"\n{'='*20} 第 {round_num} 轮 Phase 1（正常发），{len(round_accounts)} 个账号 {'='*20}")
-
-        random.shuffle(doc_pool)
-        round_pairs = list(zip(round_accounts, doc_pool[:len(round_accounts)]))
-
-        for name, doc in round_pairs:
-            success, reason = _do_publish(name, doc, round_num, is_retry=False)
-            if success:
-                sent_accounts_set.add(name)
-                _append_sent_excel(name)
-                _append_summary(name, round_num, "发文时间")
-            else:
-                _append_fail_list(name, reason, os.path.basename(doc), round_num)
-                _append_summary(name, round_num, "失败时间")
-                if acc_fail_count.get(name, 0) >= MAX_ACC_RETRY:
-                    if name not in skipped_accounts:
-                        skipped_accounts.append(name)
-                        log(f"  ! 账号 {name} 累计失败 {MAX_ACC_RETRY} 次，放弃")
-
-        # Phase 2: 本轮末补发失败列表
-        log(f"\n{'='*20} 第 {round_num} 轮 Phase 2（补发失败） {'='*20}")
-        retry_round = 0
-        while retry_round < MAX_RETRY_PER_ROUND:
-            pending = [f for f in _read_fail_list() if f[4] == round_num and f[0] not in sent_accounts_set]
-            if not pending:
-                log(f"  补发列表已清空，本轮齐活")
-                break
-            retry_round += 1
-            log(f"\n  补发 {retry_round}/{MAX_RETRY_PER_ROUND} 次，待补 {len(pending)} 个")
-            for f_name, f_reason, f_docname, f_ts, f_rnd in pending:
-                if f_name in skipped_accounts:
-                    continue
-                doc_path = None
-                for d in doc_pool:
-                    if os.path.basename(d) == f_docname:
-                        doc_path = d
-                        break
-                if doc_path is None:
-                    if not doc_pool:
-                        log(f"  X doc_pool空，无法补发 {f_name}")
-                        continue
-                    doc_path = random.choice(doc_pool)
-                success, reason = _do_publish(f_name, doc_path, round_num, is_retry=True)
-                if success:
-                    sent_accounts_set.add(f_name)
-                    _append_sent_excel(f_name)
-                    _remove_from_fail_list(f_name)
-                    _append_summary(f_name, round_num, "补发成功时间")
-                    log(f"  ✓ 补发成功: {f_name}")
-                else:
-                    if acc_fail_count.get(f_name, 0) >= MAX_ACC_RETRY:
-                        if f_name not in skipped_accounts:
-                            skipped_accounts.append(f_name)
-                            log(f"  ! 账号 {f_name} 累计失败 {MAX_ACC_RETRY} 次，放弃")
-
-        # Phase 3: 清空本轮两sheet 进下一轮
-        residual = [f for f in _read_fail_list() if f[4] == round_num and f[0] not in sent_accounts_set]
-        for f_name, _, _, _, _ in residual:
-            if f_name not in skipped_accounts:
-                skipped_accounts.append(f_name)
-                log(f"  ! 补发仍失败，放弃本轮账号: {f_name}")
-        _clear_round_sheets()
-        sent_accounts_set.clear()
-        log(f"\n第 {round_num} 轮结束，已清空本轮记录")
+    acc_count        = result["acc_count"]
+    dead_terminated  = result["dead_terminated"]
+    doc_pool         = result["doc_pool"]
+    ok_count         = result["ok_count"]
+    fail_count       = result["fail_count"]
+    total_notices    = result["total_notices"]
+    total_violations = result["total_violations"]
+    total_alerts     = result["total_alerts"]
 
     if doc_pool:
-        log(f"\n! 文档池还剩 {len(doc_pool)} 篇未发完")
+        log(f"\n! 文档池还剩 {len(doc_pool)} 篇未发完(死磕已无可用账号)")
         for d in doc_pool:
             log(f"  未发: {os.path.basename(d)}")
 
     main_ws.close()
+
+    # ========== 收尾:硬终止账号汇报 ==========
+    if dead_terminated:
+        log(f"\n★ 4 类硬终止账号 {len(dead_terminated)} 个 (已写入'硬终止账号'sheet,需人工处理):")
+        for name, (reason, ts, cnt) in dead_terminated.items():
+            log(f"  - {name}\t{reason}\t本次已发 {cnt} 篇\t{ts}")
+    else:
+        log("\n★ 无硬终止账号,本次全部账号正常完成或仍在 active")
+
+    # ========== 信用分记录 ==========
+    if credit_records:
+        credit_file = os.path.join(RUN_REPORT_DIR, "信用分记录.txt")
+        def _ck(item):
+            n, s = item
+            return (s if s is not None else -1, n)
+        sorted_items = sorted(credit_records.items(), key=_ck)
+        danger = warn = 0
+        with open(credit_file, "w", encoding="utf-8") as f:
+            f.write(f"信用分记录 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 60 + "\n")
+            for n, s in sorted_items:
+                if s is None:
+                    f.write(f"{n}\t未读取\n")
+                elif s < 80:
+                    f.write(f"{n}\t{s}\t★★ 危险\n"); danger += 1
+                elif s < 90:
+                    f.write(f"{n}\t{s}\t★ 警告\n"); warn += 1
+                else:
+                    f.write(f"{n}\t{s}\n")
+        log(f"信用分记录: {len(credit_records)} 条（危险 {danger}，警告 {warn}）")
 
     # 汇总报告
     summary = [
         f"{'='*60}",
         f"运行汇总 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"{'='*60}",
-        f"类型    : 文章发布",
+        f"类型    : 文章发布(死磕模式)",
         f"报告目录: {RUN_REPORT_DIR}",
         f"",
-        f"成功发布: {ok_count} 个账号",
-        f"最终失败: {fail_count} 个账号",
-        f"放弃账号: {len(skipped_accounts)} 个",
+        f"成功发布: {ok_count} 篇",
+        f"中途失败: {fail_count} 次(已重试到底)",
+        f"硬终止号: {len(dead_terminated)} 个 (失登/封号/禁言/找不到)",
+        f"文档剩余: {len(doc_pool)} 篇",
+        f"",
+        f"系统通知: {total_notices} 条（近两天）",
+        f"违规命中: {total_violations} 条",
+        f"高阅读量: {total_alerts} 条",
         f"{'='*60}",
     ]
     summary_text = "\n".join(summary)
