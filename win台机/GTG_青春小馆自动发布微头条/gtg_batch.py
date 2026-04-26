@@ -773,7 +773,12 @@ def scroll_find_account(main_ws, name):
                     var t = items[i].textContent.trim();
                     if(t === {name_json} || t.startsWith({name_json})){{
                         var r = items[i].getBoundingClientRect();
-                        if(r.width > 0)
+                        if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
+                            return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
+                        // 坐标不在视口内,再滚一次居中
+                        items[i].scrollIntoView({{block:'center', behavior:'instant'}});
+                        r = items[i].getBoundingClientRect();
+                        if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
                             return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
                     }}
                 }}
@@ -803,14 +808,61 @@ def scroll_find_account(main_ws, name):
             else:
                 same_count = 0
 
-    # 兜底:虚拟滚动 + lazy render → 主循环常漏掉最后几个账号
-    # 强制滚到底,等 1.5s DOM 稳定,再扫一次;y 钳制在视口内防止点击落空
+    # 兜底 1:搜索框过滤(参考 Mac 版,用 JS nativeInputValueSetter 触发 React 友好的 input)
+    # 滚动找不到时,把账号名键入侧边栏搜索框,列表自动过滤后再定位
+    log(f"  滚动未找到,尝试搜索框过滤: {name}")
+    search_filled = js(main_ws, f"""
+    (function(){{
+        var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
+        if(!s) return null;
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(s, {name_json});
+        s.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        s.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        return 'filled';
+    }})()
+    """, 14)
+    if search_filled == 'filled':
+        time.sleep(1.5)
+        pos = js(main_ws, f"""
+        (function(){{
+            var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+            for(var i=0;i<items.length;i++){{
+                var t = items[i].textContent.trim();
+                if(t === {name_json} || t.startsWith({name_json})){{
+                    items[i].scrollIntoView({{block:'center', behavior:'instant'}});
+                    var r = items[i].getBoundingClientRect();
+                    if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
+                        return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
+                }}
+            }}
+            return null;
+        }})()
+        """, 16)
+        # 不管成败,清空搜索框恢复完整列表
+        js(main_ws, """
+        (function(){
+            var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
+            if(!s) return;
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(s, '');
+            s.dispatchEvent(new Event('input', { bubbles: true }));
+            s.dispatchEvent(new Event('change', { bubbles: true }));
+        })()
+        """, 17)
+        time.sleep(0.5)
+        if pos:
+            log(f"  兜底1命中:搜索框过滤定位到 {name}")
+            return json.loads(pos)
+
+    # 兜底 2:虚拟滚动 + lazy render → 强制滚到容器底部再找
+    # 等 1.5s DOM 稳定,scrollIntoView block:'nearest';y 钳制在视口内防止点击落空
     js(main_ws, """
     (function(){
         var c = document.querySelector('[class*="menuMainWarpper"]');
         if(c) c.scrollTop = c.scrollHeight;
     })()
-    """, 14)
+    """, 18)
     time.sleep(1.5)
     pos = js(main_ws, f"""
     (function(){{
@@ -829,9 +881,9 @@ def scroll_find_account(main_ws, name):
         }}
         return null;
     }})()
-    """, 15)
+    """, 19)
     if pos:
-        log(f"  兜底:滚到底再找,命中 {name}(原循环漏读,这是最后一批账号常见问题)")
+        log(f"  兜底2命中:滚到底再找,定位到 {name}")
         time.sleep(0.3)
         return json.loads(pos)
     return None
