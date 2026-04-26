@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # MCN流量对比 - 每天运行一次，追加今日统计列到流量对比汇总.xlsx
+# 【Win 台机版】路径自适应:Mac 在 ~/Library/Application Support/创作罐头/...,
+#   Win 在 %APPDATA%\创作罐头\Partitions\<id>\Network\Cookies(多一层 Network)。
 
 import sqlite3, os, sys, json, requests, urllib.request, websocket
-import zipfile, io, xml.etree.ElementTree as ET, time, re, warnings
+import zipfile, io, xml.etree.ElementTree as ET, time, re, warnings, platform, glob
 from datetime import date, timedelta
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -11,26 +13,52 @@ from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings('ignore')
 
-PARTITION_DIR    = os.path.expanduser("~/Library/Application Support/创作罐头/Partitions")
-MAIN_COOKIE      = os.path.expanduser("~/Library/Application Support/创作罐头/Cookies")
+# ── 路径自适应(Mac vs Win)─────────────────────────────────
+IS_WIN = platform.system() == 'Windows'
+if IS_WIN:
+    GTH_BASE = os.path.join(os.environ.get('APPDATA', ''), '创作罐头')
+    COOKIE_SUFFIX = os.path.join('Network', 'Cookies')   # Win:Partitions\<id>\Network\Cookies
+    MAIN_COOKIE   = os.path.join(GTH_BASE, 'Network', 'Cookies')
+else:
+    GTH_BASE = os.path.expanduser('~/Library/Application Support/创作罐头')
+    COOKIE_SUFFIX = 'Cookies'                            # Mac:Partitions/<id>/Cookies
+    MAIN_COOKIE   = os.path.join(GTH_BASE, 'Cookies')
+
+PARTITION_DIR    = os.path.join(GTH_BASE, 'Partitions')
 MOTHER_PARTITION = "7477169161966321683"   # 小馆矩阵
 SISTER_PARTITION = "7601367523329638450"   # 迦境矩阵
-XLSX_PATH        = os.path.join(os.path.dirname(__file__), "流量对比汇总.xlsx")
+
+def _find_input_xlsx():
+    """读取用:找最新版本(按修改时间)。支持「流量对比汇总.xlsx」「流量对比汇总4.25.xlsx」等命名。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands = [p for p in glob.glob(os.path.join(here, '流量对比汇总*.xlsx'))
+             if not os.path.basename(p).startswith('~$')]
+    if not cands:
+        return os.path.join(here, '流量对比汇总.xlsx')
+    return max(cands, key=os.path.getmtime)
+
+def _make_output_xlsx(stat_date):
+    """写入用:按 stat_date 生成「流量对比汇总<月>月<日>.xlsx」,每天一个新文件不覆盖历史。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, f'流量对比汇总{stat_date.month}月{stat_date.day}.xlsx')
+
+INPUT_XLSX = _find_input_xlsx()
+# OUTPUT_XLSX 在 main() 里根据 stat_date 计算
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' if IS_WIN
+                  else 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
     'Referer': 'https://mp.toutiao.com/profile_v4/lab/matrix_manage/content'
 }
 
 # ── Cookie ────────────────────────────────────────────────
 def load_cookies_sqlite(partition_id=None):
-    """从创作罐头 sqlite 读 cookie。不传 partition_id 则读小馆（兼容老逻辑）。
-    传入 partition_id 则读指定 Partition 的 Cookies（每个账号一个 Partition）。"""
+    """从创作罐头 sqlite 读 cookie。Win 上路径是 Partitions/<id>/Network/Cookies。"""
     cookies = {}
     if partition_id is None:
-        paths = [MAIN_COOKIE, os.path.join(PARTITION_DIR, MOTHER_PARTITION, "Cookies")]
+        paths = [MAIN_COOKIE, os.path.join(PARTITION_DIR, MOTHER_PARTITION, *COOKIE_SUFFIX.split(os.sep))]
     else:
-        paths = [os.path.join(PARTITION_DIR, partition_id, "Cookies")]
+        paths = [os.path.join(PARTITION_DIR, partition_id, *COOKIE_SUFFIX.split(os.sep))]
     for f in paths:
         if not os.path.exists(f): continue
         try:
@@ -39,11 +67,14 @@ def load_cookies_sqlite(partition_id=None):
             cur.execute("SELECT name, value FROM cookies WHERE host_key LIKE '%toutiao%' OR host_key LIKE '%bytedance%'")
             for name, val in cur.fetchall(): cookies[name] = val
             conn.close()
-        except: pass
+        except Exception as e:
+            print(f"  读 {f} 失败: {e}")
     return cookies
 
 def load_cookies_cdp():
-    port_file = os.path.expanduser("~/Library/Application Support/创作罐头/DevToolsActivePort")
+    port_file = os.path.join(GTH_BASE, 'DevToolsActivePort')
+    if not os.path.exists(port_file):
+        return {}
     port = int(open(port_file).readline().strip())
     try:
         pages = json.loads(urllib.request.urlopen(f'http://localhost:{port}/json', timeout=5).read())
@@ -107,10 +138,10 @@ def fetch_day(cookies, pub_date: date, content_type: int):
             print(f"    {day_str} 失败: {e}"); break
     recommend = read = 0
     for row in all_rows:
-        if content_type == 3:  # 微头条：阅读量在 index 2，无推荐量列
+        if content_type == 3:  # 微头条:阅读量在 index 2,无推荐量列
             try: read += int(float(row[2])) if len(row) > 2 and row[2] else 0
             except: pass
-        else:  # 文章：推荐量 index 2，阅读量 index 3
+        else:  # 文章:推荐量 index 2,阅读量 index 3
             try: recommend += int(float(row[2])) if len(row) > 2 and row[2] else 0
             except: pass
             try: read += int(float(row[3])) if len(row) > 3 and row[3] else 0
@@ -166,7 +197,6 @@ def sc(ws, row, col, val, fill=None, font=None):
     if fill:
         c.fill = fill
     elif row > 1:
-        # 跟随A列底色（保留黄色高亮等）；否则按行号交替
         a_rgb = None
         if col != 1:
             af = ws.cell(row, 1).fill
@@ -186,33 +216,37 @@ def date_to_label(d: date):
 
 # ── 主逻辑 ───────────────────────────────────────────────
 def append_to_xlsx(stat_date: date, xg_cookies, jj_cookies, today_mode=False):
-    if not os.path.exists(XLSX_PATH):
-        print(f"找不到 {XLSX_PATH}"); return
+    if not os.path.exists(INPUT_XLSX):
+        print(f"找不到 {INPUT_XLSX}")
+        print(f"请把 air 桌面的「流量对比汇总.xlsx」拷到此目录:{os.path.dirname(INPUT_XLSX)}")
+        return
 
-    wb = load_workbook(XLSX_PATH)
-    stat_day   = f"{stat_date.day}号"   # "22号"
+    output_xlsx = _make_output_xlsx(stat_date)
+    print(f"读取: {os.path.basename(INPUT_XLSX)}")
+    print(f"写入: {os.path.basename(output_xlsx)}{'(覆盖同日已有)' if os.path.exists(output_xlsx) else '(新建)'}")
+    wb = load_workbook(INPUT_XLSX)
+    stat_day   = f"{stat_date.day}号"
     pub_date   = stat_date - timedelta(days=1)
-    pub_label  = date_to_label(pub_date)   # "4月21号"
-    stat_label = date_to_label(stat_date)  # "4月22号"（today_mode 用）
+    pub_label  = date_to_label(pub_date)
+    stat_label = date_to_label(stat_date)
 
-    # ── 重复跑拦截 ──
-    # 若 "X号阅读" 列已存在且任一 existing 行已写入真值，说明之前已跑过 stat_date=X，
-    # 再跑会把昨晚 23:50 的定格快照覆盖。直接中止，不给机会。
-    read_col_name = f"{stat_day}阅读"
-    for sn in wb.sheetnames:
-        if '收益' in sn: continue
-        ws_ck = wb[sn]
-        hdr = [ws_ck.cell(1, c).value for c in range(1, ws_ck.max_column+1)]
-        if read_col_name not in hdr: continue
-        col_idx = hdr.index(read_col_name) + 1
-        for r in range(2, ws_ck.max_row + 1):
-            v = ws_ck.cell(r, col_idx).value
-            if v not in (None, '', '-', 0):
-                lbl = ws_ck.cell(r, 1).value
-                print(f"\n⛔ 中止：{sn} 的「{read_col_name}」列已有数据（{lbl} = {v}）")
-                print(f"   stat_date={stat_date} 之前已跑过。再跑会覆盖定格快照。")
-                print(f"   真要重跑请先手动清空该列那些格子。")
-                sys.exit(1)
+    # ── 重复跑拦截 ──(today_mode 跳过:用户主动刷新今日,允许覆盖)
+    if not today_mode:
+        read_col_name = f"{stat_day}阅读"
+        for sn in wb.sheetnames:
+            if '收益' in sn: continue
+            ws_ck = wb[sn]
+            hdr = [ws_ck.cell(1, c).value for c in range(1, ws_ck.max_column+1)]
+            if read_col_name not in hdr: continue
+            col_idx = hdr.index(read_col_name) + 1
+            for r in range(2, ws_ck.max_row + 1):
+                v = ws_ck.cell(r, col_idx).value
+                if v not in (None, '', '-', 0):
+                    lbl = ws_ck.cell(r, 1).value
+                    print(f"\n⛔ 中止:{sn} 的「{read_col_name}」列已有数据({lbl} = {v})")
+                    print(f"   stat_date={stat_date} 之前已跑过。再跑会覆盖定格快照。")
+                    print(f"   真要重跑请先手动清空该列那些格子,或加 --today 强制刷新。")
+                    sys.exit(1)
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -223,7 +257,6 @@ def append_to_xlsx(stat_date: date, xg_cookies, jj_cookies, today_mode=False):
             for r in range(2, ws.max_row + 1):
                 lbl = ws.cell(r, 1).value
                 if lbl: existing[str(lbl)] = r
-            # 只到 stat_date-1（当天数据未结算，推荐/阅读会复用前一天值）
             d = date(stat_date.year, stat_date.month, 1)
             while d < stat_date:
                 lbl = date_to_label(d)
@@ -250,33 +283,28 @@ def append_to_xlsx(stat_date: date, xg_cookies, jj_cookies, today_mode=False):
         is_micro = '微头条' in sheet_name
         ctype    = 3 if is_micro else 1
 
-        # 把旧列名"批"改成"号"
         for c in range(1, ws.max_column + 1):
             h = ws.cell(1, c).value
             if h and isinstance(h, str) and '批' in h:
                 ws.cell(1, c).value = h.replace('批', '号')
 
-        # 读现有发布日行
         existing = {}
         for r in range(2, ws.max_row + 1):
             lbl = ws.cell(r, 1).value
             if lbl: existing[str(lbl)] = r
 
-        # --today 模式：追加今天（stat_date）那一行，否则看不到今天实时发的文章
         if today_mode and stat_label not in existing:
             new_row = ws.max_row + 1
             sc(ws, new_row, 1, stat_label, font=BLD_FONT)
             existing[stat_label] = new_row
             print(f"  [{sheet_name}] 新增今天行: {stat_label}")
 
-        # 只追加昨天（stat_date-1）那一行（如果不存在）
         if pub_label not in existing:
             new_row = ws.max_row + 1
             sc(ws, new_row, 1, pub_label, font=BLD_FONT)
             existing[pub_label] = new_row
             print(f"  [{sheet_name}] 新增行: {pub_label}")
 
-        # 新列插入位置：列已存在则复用（继续拉数据覆盖），不存在则新建
         headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         if is_micro:
             read_name = f"{stat_day}阅读"
@@ -289,7 +317,6 @@ def append_to_xlsx(stat_date: date, xg_cookies, jj_cookies, today_mode=False):
         else:
             rec_name = f"{stat_day}推荐"
             read_name = f"{stat_day}阅读"
-            # 推荐列：已存在则复用，否则插到最后"推荐"列后面
             if rec_name in headers:
                 rec_col = headers.index(rec_name) + 1
             else:
@@ -305,7 +332,6 @@ def append_to_xlsx(stat_date: date, xg_cookies, jj_cookies, today_mode=False):
                     rec_col = ws.max_column + 1
                 sc(ws, 1, rec_col, rec_name, NEW_FILL, WHT_FONT)
                 ws.column_dimensions[get_column_letter(rec_col)].width = 11
-            # 阅读列：insert_cols 可能改了列号，重读 headers
             headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
             if read_name in headers:
                 read_col = headers.index(read_name) + 1
@@ -314,7 +340,6 @@ def append_to_xlsx(stat_date: date, xg_cookies, jj_cookies, today_mode=False):
                 sc(ws, 1, read_col, read_name, NEW_FILL, WHT_FONT)
                 ws.column_dimensions[get_column_letter(read_col)].width = 11
 
-        # 拉各发布日数据填入
         for pub_lbl, row_idx in sorted(existing.items(), key=lambda x: x[0]):
             d = parse_date_label(pub_lbl)
             if d is None or d > stat_date: continue
@@ -327,35 +352,44 @@ def append_to_xlsx(stat_date: date, xg_cookies, jj_cookies, today_mode=False):
             else:
                 sc(ws, row_idx, rec_col,  val_rec)
                 sc(ws, row_idx, read_col, val_read)
-            # 发文数取最新快照（延迟统计的补发会让 total 增长）
             if data['total'] > 0:
                 sc(ws, row_idx, 2, data['total'])
 
-    wb.save(XLSX_PATH)
-    print(f"\n已保存: {XLSX_PATH}")
+    wb.save(output_xlsx)
+    print(f"\n已保存: {output_xlsx}")
 
 def main():
     args = sys.argv[1:]
-    today_mode = False
-    if args and args[0] == '--today':
-        today = date.today()
-        today_mode = True
-        print("[--today 模式] 自动追加今天发布日行（看今天实时数据用）")
-    elif args:
-        today = date.fromisoformat(args[0])
-    else:
-        today = date.today()
-    print(f"统计日: {today}  ({today.day}号列){' [today_mode]' if today_mode else ''}\n")
+    # 默认 today_mode=True(用户期望每天看当天) — 加 --no-today 关闭
+    today_mode = True
+    today = date.today()
+    if args:
+        if args[0] == '--no-today':
+            today_mode = False
+        elif args[0] == '--today':
+            today_mode = True
+        else:
+            try:
+                today = date.fromisoformat(args[0])
+                today_mode = False  # 指定历史日期时不开 today_mode
+            except ValueError:
+                pass
+    print(f"统计日: {today}  ({today.day}号列){' [today_mode]' if today_mode else ''}")
+    print(f"平台: {'Win' if IS_WIN else 'Mac'} | 罐头根: {GTH_BASE}\n")
 
-    print("读取小馆cookie (Partition)...")
+    print("读取小馆 cookie (Partition)...")
     xg = load_cookies_sqlite(MOTHER_PARTITION)
     print(f"  {'OK' if xg.get('sessionid') else '失败'}  sid={xg.get('sessionid','')[:16]}")
-    print("读取迦境cookie (Partition)...")
+    print("读取迦境 cookie (Partition)...")
     jj = load_cookies_sqlite(SISTER_PARTITION)
     print(f"  {'OK' if jj.get('sessionid') else '失败'}  sid={jj.get('sessionid','')[:16]}\n")
 
+    if not xg.get('sessionid') or not jj.get('sessionid'):
+        print("⛔ 至少一个矩阵 cookie 没读到。先在罐头里登录小馆/迦境账号,或检查罐头有没有在跑。")
+        sys.exit(1)
+
     append_to_xlsx(today, xg, jj, today_mode)
-    print("完成！")
+    print("完成!")
 
 if __name__ == '__main__':
     main()
