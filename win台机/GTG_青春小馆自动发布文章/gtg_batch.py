@@ -700,6 +700,37 @@ def collect_accounts(main_ws):
                     if same_count >= 4:
                         break
 
+    # 兜底:虚拟滚动列表,最后几个账号常因 lazy render 漏读
+    # 强制滚到容器最底部,等 1.5s DOM 稳定再扫一次
+    js(main_ws, """
+    (function(){
+        var c = document.querySelector('[class*="menuMainWarpper"]');
+        if(c) c.scrollTop = c.scrollHeight;
+    })()
+    """, 113)
+    time.sleep(1.5)
+    v = js(main_ws, f"""
+    (function(){{
+        var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+        var names = [];
+        for(var i=0;i<items.length;i++){{
+            var t = items[i].textContent.trim();
+            if(t) names.push(t);
+        }}
+        return JSON.stringify(names);
+    }})()
+    """, 114)
+    if v:
+        names = json.loads(v)
+        added = 0
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                accounts.append(n)
+                added += 1
+        if added:
+            log(f"  兜底:滚到底再扫一次,补收 {added} 个账号(虚拟滚动 lazy render 漏发)")
+
     log(f"共收集到 {len(accounts)} 个账号")
     return accounts
 
@@ -772,6 +803,37 @@ def scroll_find_account(main_ws, name):
             else:
                 same_count = 0
 
+    # 兜底:虚拟滚动 + lazy render → 主循环常漏掉最后几个账号
+    # 强制滚到底,等 1.5s DOM 稳定,再扫一次;y 钳制在视口内防止点击落空
+    js(main_ws, """
+    (function(){
+        var c = document.querySelector('[class*="menuMainWarpper"]');
+        if(c) c.scrollTop = c.scrollHeight;
+    })()
+    """, 14)
+    time.sleep(1.5)
+    pos = js(main_ws, f"""
+    (function(){{
+        var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+        for(var i=0;i<items.length;i++){{
+            var t = items[i].textContent.trim();
+            if(t === {name_json} || t.startsWith({name_json})){{
+                items[i].scrollIntoView({{block:'nearest', behavior:'instant'}});
+                var r = items[i].getBoundingClientRect();
+                if(r.width > 0){{
+                    var cx = Math.round(r.left + r.width/2);
+                    var cy = Math.round(Math.max(5, Math.min(r.top + r.height/2, window.innerHeight - 5)));
+                    return JSON.stringify({{x:cx, y:cy}});
+                }}
+            }}
+        }}
+        return null;
+    }})()
+    """, 15)
+    if pos:
+        log(f"  兜底:滚到底再找,命中 {name}(原循环漏读,这是最后一批账号常见问题)")
+        time.sleep(0.3)
+        return json.loads(pos)
     return None
 
 
