@@ -1788,28 +1788,6 @@ def main():
     main_ws = ws_connect(main_ws_url, timeout=10)
     log("已连接主窗口")
 
-    # 隐藏所有非罐头的可见应用 + 罐头置顶（不动窗口尺寸，缺哥要求保持原样）
-    subprocess.run(["osascript", "-e", '''
-tell application "System Events"
-    repeat with p in (every process whose visible is true and background only is false)
-        set pname to name of p
-        if pname is not "创作罐头" and pname is not "罐头" and pname is not "Finder" and pname is not "Terminal" and pname is not "Code" then
-            try
-                set visible of p to false
-            end try
-        end if
-    end repeat
-end tell
-tell application "创作罐头" to activate
-delay 0.5
-tell application "System Events"
-    tell process "创作罐头"
-        set frontmost to true
-    end tell
-end tell
-'''], capture_output=True)
-    time.sleep(1.0)
-    log("已隐藏其他应用+罐头置顶（窗口尺寸保持原样）")
 
     # 账号来源：白名单第一优先，为空则从罐头左侧栏动态读
     skip = _read_skip_set()

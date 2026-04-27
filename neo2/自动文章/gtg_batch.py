@@ -67,14 +67,17 @@ VIOLATION_KEYWORDS = {
 
 # ========== 账号配置 Excel ==========
 CONFIG_EXCEL  = os.path.join(BASE_DIR, "账号配置.xlsx")
-_EXCEL_SHEETS = ["不首发", "永久跳过", "本轮已发", "白名单", "失败列表", "发文汇总", "待补漏", "补漏历史"]
+SUMMARY_EXCEL = os.path.join(BASE_DIR, "发文汇总.xlsx")
+_EXCEL_SHEETS = ["不首发", "永久跳过", "本轮已发", "白名单", "失败列表", "硬终止账号"]
 _FAIL_HEADERS    = ["账号名", "失败原因", "文稿名", "失败时间", "轮次"]
 _SUMMARY_HEADERS = ["账号名", "轮次", "发文时间", "失败时间", "补发成功时间"]
-_PENDING_HEADERS = ["账号名", "漏发数", "文稿名", "生成时间"]
-_HISTORY_HEADERS = ["补齐日期", "账号名", "补齐篇数", "漏发生成时间"]
+_HARD_TERMINATE_HEADERS = ["账号名", "终止原因", "终止时间", "本次已发篇数"]
+
+# 4 类硬终止 reason — 命中即永久放弃,不再尝试
+HARD_TERMINATE_REASONS = {"失登", "封号", "禁言", "侧边栏未找到"}
 
 def _ensure_config_excel():
-    """如果账号配置.xlsx不存在则自动创建（含6个sheet）；已存在则确保新sheet有表头"""
+    """如果账号配置.xlsx不存在则自动创建;已存在则确保关键 sheet 有表头"""
     if not os.path.exists(CONFIG_EXCEL):
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -82,36 +85,40 @@ def _ensure_config_excel():
             ws_new = wb.create_sheet(sh)
             if sh == "失败列表":
                 ws_new.append(_FAIL_HEADERS)
-            elif sh == "发文汇总":
-                ws_new.append(_SUMMARY_HEADERS)
-            elif sh == "待补漏":
-                ws_new.append(_PENDING_HEADERS)
-            elif sh == "补漏历史":
-                ws_new.append(_HISTORY_HEADERS)
+            elif sh == "硬终止账号":
+                ws_new.append(_HARD_TERMINATE_HEADERS)
+            elif sh == "白名单":
+                ws_new.append(["账号名", "发文份数"])
             else:
                 ws_new.append(["账号名"])
         wb.save(CONFIG_EXCEL)
         return
-    # 文件已存在：补齐缺失sheet
     try:
         wb = openpyxl.load_workbook(CONFIG_EXCEL)
         dirty = False
         if "失败列表" not in wb.sheetnames:
             ws_n = wb.create_sheet("失败列表")
             ws_n.append(_FAIL_HEADERS); dirty = True
-        if "发文汇总" not in wb.sheetnames:
-            ws_n = wb.create_sheet("发文汇总")
-            ws_n.append(_SUMMARY_HEADERS); dirty = True
-        if "待补漏" not in wb.sheetnames:
-            ws_n = wb.create_sheet("待补漏")
-            ws_n.append(_PENDING_HEADERS); dirty = True
-        if "补漏历史" not in wb.sheetnames:
-            ws_n = wb.create_sheet("补漏历史")
-            ws_n.append(_HISTORY_HEADERS); dirty = True
+        if "硬终止账号" not in wb.sheetnames:
+            ws_n = wb.create_sheet("硬终止账号")
+            ws_n.append(_HARD_TERMINATE_HEADERS); dirty = True
         if dirty:
             wb.save(CONFIG_EXCEL)
     except Exception:
         pass
+
+def _ensure_summary_excel():
+    if os.path.exists(SUMMARY_EXCEL):
+        return
+    try:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "发文汇总"
+        ws.append(_SUMMARY_HEADERS)
+        wb.save(SUMMARY_EXCEL)
+    except Exception:
+        pass
+
 
 def _read_whitelist_with_quota():
     """读白名单sheet：A列账号 + B列配额（空/非数字视为1）。返回 {账号: 配额}"""
@@ -239,8 +246,7 @@ def _remove_from_fail_list(name):
         pass
 
 def _append_summary(name, round_num, event_type, ts=None):
-    """往发文汇总追加一条；event_type: '发文时间'/'失败时间'/'补发成功时间'。
-       若已存在(name,round_num)行则更新对应列；否则新建一行。"""
+    """往独立 发文汇总.xlsx 追加/更新。event_type: 发文时间/失败时间/补发成功时间"""
     if ts is None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     col_map = {"发文时间": 3, "失败时间": 4, "补发成功时间": 5}
@@ -248,14 +254,11 @@ def _append_summary(name, round_num, event_type, ts=None):
     if col is None:
         return
     try:
-        _ensure_config_excel()
-        wb = openpyxl.load_workbook(CONFIG_EXCEL)
-        if "发文汇总" not in wb.sheetnames:
-            ws_s = wb.create_sheet("发文汇总")
+        _ensure_summary_excel()
+        wb = openpyxl.load_workbook(SUMMARY_EXCEL)
+        ws_s = wb["发文汇总"] if "发文汇总" in wb.sheetnames else wb.create_sheet("发文汇总")
+        if ws_s.max_row == 0:
             ws_s.append(_SUMMARY_HEADERS)
-        else:
-            ws_s = wb["发文汇总"]
-        # 查找是否已有 (name, round_num) 行
         target_row = None
         for r_idx in range(2, ws_s.max_row + 1):
             a = ws_s.cell(r_idx, 1).value
@@ -267,84 +270,30 @@ def _append_summary(name, round_num, event_type, ts=None):
             ws_s.append([name, round_num, "", "", ""])
             target_row = ws_s.max_row
         ws_s.cell(target_row, col, ts)
+        wb.save(SUMMARY_EXCEL)
+    except Exception:
+        pass
+
+def _append_hard_terminate(name, reason, count_so_far):
+    """命中 4 类硬终止时,写入"硬终止账号"sheet。永久放弃,不再尝试。"""
+    try:
+        _ensure_config_excel()
+        wb = openpyxl.load_workbook(CONFIG_EXCEL)
+        if "硬终止账号" not in wb.sheetnames:
+            ws_h = wb.create_sheet("硬终止账号")
+            ws_h.append(_HARD_TERMINATE_HEADERS)
+        else:
+            ws_h = wb["硬终止账号"]
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws_h.append([name, reason, ts, count_so_far])
         wb.save(CONFIG_EXCEL)
     except Exception:
         pass
 
-def _read_pending_list():
-    """读取待补漏 → [(name, missing:int, doc_name, gen_ts), ...]"""
-    if not os.path.exists(CONFIG_EXCEL):
-        return []
-    try:
-        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
-        if "待补漏" not in wb.sheetnames:
-            wb.close(); return []
-        ws_r = wb["待补漏"]
-        result = []
-        for row in ws_r.iter_rows(min_row=2, values_only=True):
-            if not row or not row[0]: continue
-            name = str(row[0]).strip()
-            if not name or name.startswith('#'): continue
-            try:
-                missing = int(row[1]) if row[1] is not None else 0
-            except Exception:
-                missing = 0
-            if missing <= 0: continue
-            docname = str(row[2]).strip() if row[2] is not None else ""
-            gen_ts  = str(row[3]).strip() if row[3] is not None else ""
-            result.append((name, missing, docname, gen_ts))
-        wb.close()
-        return result
-    except Exception:
-        return []
 
-def _write_pending_list(records):
-    """覆盖写待补漏。records: [(name, missing, doc_name, gen_ts), ...]"""
-    try:
-        _ensure_config_excel()
-        wb = openpyxl.load_workbook(CONFIG_EXCEL)
-        if "待补漏" in wb.sheetnames:
-            ws_p = wb["待补漏"]
-            if ws_p.max_row > 1:
-                ws_p.delete_rows(2, ws_p.max_row - 1)
-        else:
-            ws_p = wb.create_sheet("待补漏")
-            ws_p.append(_PENDING_HEADERS)
-        for name, missing, doc_name, gen_ts in records:
-            ws_p.append([name, missing, doc_name or "", gen_ts or ""])
-        wb.save(CONFIG_EXCEL)
-    except Exception as e:
-        log(f"写待补漏出错: {e}")
 
-def _clear_pending_list():
-    """清空待补漏（保留表头）"""
-    try:
-        if not os.path.exists(CONFIG_EXCEL):
-            return
-        wb = openpyxl.load_workbook(CONFIG_EXCEL)
-        if "待补漏" in wb.sheetnames:
-            ws_p = wb["待补漏"]
-            if ws_p.max_row > 1:
-                ws_p.delete_rows(2, ws_p.max_row - 1)
-        wb.save(CONFIG_EXCEL)
-    except Exception:
-        pass
 
-def _append_history(rows):
-    """追加到补漏历史。rows: [(补齐日期, 账号名, 补齐篇数, 漏发生成时间), ...]"""
-    try:
-        _ensure_config_excel()
-        wb = openpyxl.load_workbook(CONFIG_EXCEL)
-        if "补漏历史" not in wb.sheetnames:
-            ws_h = wb.create_sheet("补漏历史")
-            ws_h.append(_HISTORY_HEADERS)
-        else:
-            ws_h = wb["补漏历史"]
-        for r in rows:
-            ws_h.append(list(r))
-        wb.save(CONFIG_EXCEL)
-    except Exception as e:
-        log(f"写补漏历史出错: {e}")
+
 
 def _clear_round_sheets():
     """轮末齐活后清空 本轮已发 和 失败列表（保留表头）"""
@@ -362,11 +311,11 @@ def _clear_round_sheets():
         pass
 
 def _sort_summary_by_account():
-    """运行结束后，对发文汇总按账号分组排序（同账号的多轮放一起，按轮次升序）"""
+    """按账号分组排序 发文汇总.xlsx"""
     try:
-        if not os.path.exists(CONFIG_EXCEL):
+        if not os.path.exists(SUMMARY_EXCEL):
             return
-        wb = openpyxl.load_workbook(CONFIG_EXCEL)
+        wb = openpyxl.load_workbook(SUMMARY_EXCEL)
         if "发文汇总" not in wb.sheetnames:
             wb.close(); return
         ws_s = wb["发文汇总"]
@@ -375,16 +324,15 @@ def _sort_summary_by_account():
             row = [ws_s.cell(r_idx, c).value for c in range(1, 6)]
             if row[0]:
                 data.append(row)
-        # 按账号+轮次升序（保持账号组内有序）
         data.sort(key=lambda r: (str(r[0]), int(r[1]) if r[1] is not None else 0))
-        # 清空并重写
         if ws_s.max_row > 1:
             ws_s.delete_rows(2, ws_s.max_row - 1)
         for row in data:
             ws_s.append(row)
-        wb.save(CONFIG_EXCEL)
+        wb.save(SUMMARY_EXCEL)
     except Exception:
         pass
+
 
 # =====================================
 
@@ -531,6 +479,37 @@ def collect_accounts(main_ws):
                     same_count += 1
                     if same_count >= 4:
                         break
+
+    # 兜底:虚拟滚动列表,最后几个账号常因 lazy render 漏读
+    # 强制滚到容器最底部,等 1.5s DOM 稳定再扫一次
+    js(main_ws, """
+    (function(){
+        var c = document.querySelector('[class*="menuMainWarpper"]');
+        if(c) c.scrollTop = c.scrollHeight;
+    })()
+    """, 113)
+    time.sleep(1.5)
+    v = js(main_ws, f"""
+    (function(){{
+        var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+        var names = [];
+        for(var i=0;i<items.length;i++){{
+            var t = items[i].textContent.trim();
+            if(t) names.push(t);
+        }}
+        return JSON.stringify(names);
+    }})()
+    """, 114)
+    if v:
+        names = json.loads(v)
+        added = 0
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                accounts.append(n)
+                added += 1
+        if added:
+            log(f"  兜底:滚到底再扫一次,补收 {added} 个账号(虚拟滚动 lazy render 漏发)")
 
     log(f"共收集到 {len(accounts)} 个账号")
     return accounts
@@ -1695,6 +1674,238 @@ def move_to_sent(doc_path):
     log(f"  已移至已发送: {os.path.basename(dest)}")
 
 
+# ========== 死磕主循环 (公共函数) ==========
+
+def run_death_grip(
+    accounts,
+    per_account_quota,
+    doc_pool,
+    main_ws,
+    sub_rounds=3,
+    max_fail_per_sub=3,
+    sent_accounts_set=None,
+    credit_records=None,
+    fail_records=None,
+    success_accounts=None,
+    initial_acc_count=None,
+    initial_dead=None,
+    log_label="",
+):
+    """死磕循环:大循环 N 小轮 + 外层无限磕。
+    - 4 类硬终止 → 即刻永久放弃
+    - 其他失败 → 本小轮内累计 max_fail_per_sub 次跳过本小轮,下小轮恢复
+    - 大循环跑完 + 还有 quota → 继续下一大循环(无限磕)
+    """
+    sent_accounts_set = sent_accounts_set if sent_accounts_set is not None else set()
+    credit_records   = credit_records if credit_records is not None else {}
+    fail_records     = fail_records if fail_records is not None else []
+    success_accounts = success_accounts if success_accounts is not None else set()
+    acc_count        = dict(initial_acc_count) if initial_acc_count else {}
+    for a in accounts:
+        acc_count.setdefault(a, 0)
+    dead_terminated  = dict(initial_dead) if initial_dead else {}
+
+    ok_count = fail_count = 0
+    total_notices = total_violations = total_alerts = 0
+    big_round = 0
+
+    def _do_publish(name, doc, round_label, is_retry=False):
+        nonlocal ok_count, fail_count, total_notices, total_violations, total_alerts
+        log(f"\n  {log_label}[剩余 {len(doc_pool)} 篇] {round_label} {'[补发]' if is_retry else ''} {name}  ->  {os.path.basename(doc)}")
+
+        pos = scroll_find_account(main_ws, name)
+        if not pos:
+            log(f"  X 未在侧边栏找到账号: {name}")
+            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, "侧边栏未找到"))
+            fail_count += 1
+            return False, "侧边栏未找到"
+
+        log(f"  点击坐标({pos['x']},{pos['y']})")
+        click(main_ws, pos["x"], pos["y"], 20)
+        time.sleep(WAIT_LOAD)
+
+        ws_url = find_account_webview(main_ws, name)
+        if not ws_url:
+            log("  X 找不到 webview")
+            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, "webview匹配失败"))
+            fail_count += 1
+            close_current_tab(main_ws)
+            return False, "webview匹配失败"
+
+        page_url = get_url_from_ws(ws_url)
+        if "login" in page_url:
+            log("  X 账号失登")
+            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, "失登"))
+            fail_count += 1
+            close_current_tab(main_ws)
+            return False, "失登"
+
+        nc, vc = check_system_notice(ws_url, name)
+        total_notices += nc
+        total_violations += vc
+        time.sleep(2)
+
+        _d_wait = random.randint(8, 20)
+        try:
+            credit_buf = []
+            success, reason = publish_article(ws_url, doc, main_ws, name, credit_buf)
+            if credit_buf and credit_buf[0] is not None:
+                credit_records[name] = credit_buf[0]
+            if success:
+                move_to_sent(doc)
+                if doc in doc_pool:
+                    doc_pool.remove(doc)
+                acc_count[name] = acc_count.get(name, 0) + 1
+                success_accounts.add(name)
+                ok_count += 1
+                total_alerts += check_reading_stats(ws_url, name)
+                return True, ""
+            else:
+                log(f"  X 发布失败: {reason}")
+                fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, reason))
+                fail_count += 1
+                return False, reason
+        except Exception as e:
+            log(f"  X 异常: {e}")
+            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, f"异常: {e}"))
+            fail_count += 1
+            return False, f"异常: {e}"
+        finally:
+            close_current_tab(main_ws)
+            log(f"  篇间等待 {_d_wait} 秒...")
+            time.sleep(_d_wait)
+
+    def _is_eligible(name, sub_skipped):
+        return (name not in dead_terminated and
+                name not in sub_skipped and
+                name not in sent_accounts_set and
+                acc_count.get(name, 0) < per_account_quota.get(name, 0))
+
+    def _handle_failure(name, reason, sub_fail_count, sub_skipped):
+        if reason in HARD_TERMINATE_REASONS:
+            cnt_so_far = acc_count.get(name, 0)
+            dead_terminated[name] = (reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), cnt_so_far)
+            _append_hard_terminate(name, reason, cnt_so_far)
+            log(f"  ★ 4 类硬终止: {name} -> {reason} (本次已发 {cnt_so_far} 篇,永久放弃)")
+            return True
+        sub_fail_count[name] = sub_fail_count.get(name, 0) + 1
+        if sub_fail_count[name] >= max_fail_per_sub:
+            sub_skipped.add(name)
+            log(f"  - {name} 本小轮 {max_fail_per_sub} 次失败,跳过本小轮(下小轮恢复)")
+        return False
+
+    def _total_target():
+        return sum(per_account_quota.get(a, 0) for a in accounts if a not in dead_terminated)
+
+    def _total_done():
+        return sum(acc_count.get(a, 0) for a in accounts)
+
+    while True:
+        if not doc_pool:
+            log(f"\n{log_label}文档池已空,死磕结束")
+            break
+        active = [a for a in accounts
+                  if a not in dead_terminated
+                  and acc_count.get(a, 0) < per_account_quota.get(a, 0)]
+        if not active:
+            log(f"\n{log_label}所有账号都已满 quota,死磕结束")
+            break
+
+        big_round += 1
+        log(f"\n{'='*20} {log_label}第 {big_round} 大循环 开始 (active {len(active)} 账号,文档池 {len(doc_pool)} 篇) {'='*20}")
+
+        for sub_idx in range(1, sub_rounds + 1):
+            log(f"\n----- {log_label}第 {big_round} 大循环 / 第 {sub_idx} 小轮 (Phase A) -----")
+            sub_fail_count = {}
+            sub_skipped = set()
+            sub_round_id = big_round * 100 + sub_idx
+
+            for name in list(accounts):
+                if not doc_pool:
+                    log(f"  Phase A 中文档池已空,提前结束")
+                    break
+                if not _is_eligible(name, sub_skipped):
+                    continue
+                doc = random.choice(doc_pool)
+                round_label = f"[大{big_round}/小{sub_idx}/A]"
+                write_status(big_round, sub_idx, "Phase A",
+                             total_done=_total_done(), total_target=_total_target(),
+                             doc_pool_size=len(doc_pool),
+                             sub_failed=len(sub_skipped), dead_terminated=dead_terminated)
+                success, reason = _do_publish(name, doc, round_label, is_retry=False)
+                if success:
+                    sent_accounts_set.add(name)
+                    _append_sent_excel(name)
+                    _append_summary(name, sub_round_id, "发文时间")
+                else:
+                    _append_fail_list(name, reason, os.path.basename(doc), sub_round_id)
+                    _append_summary(name, sub_round_id, "失败时间")
+                    _handle_failure(name, reason, sub_fail_count, sub_skipped)
+
+            phase_b_round = 0
+            while phase_b_round < max_fail_per_sub and doc_pool:
+                phase_b_round += 1
+                pending = [f for f in _read_fail_list()
+                           if f[4] == sub_round_id
+                           and f[0] not in sent_accounts_set
+                           and f[0] not in dead_terminated
+                           and f[0] not in sub_skipped]
+                if not pending:
+                    log(f"  Phase B: 失败列表已清空,本小轮齐活")
+                    break
+                log(f"\n  {log_label}Phase B 第 {phase_b_round}/{max_fail_per_sub} 次, 待补 {len(pending)} 个")
+                for f_name, f_reason, f_docname, f_ts, f_rnd in pending:
+                    if not _is_eligible(f_name, sub_skipped):
+                        continue
+                    doc_path = None
+                    for d in doc_pool:
+                        if os.path.basename(d) == f_docname:
+                            doc_path = d
+                            break
+                    if doc_path is None:
+                        if not doc_pool:
+                            break
+                        doc_path = random.choice(doc_pool)
+                    round_label = f"[大{big_round}/小{sub_idx}/B-{phase_b_round}]"
+                    write_status(big_round, sub_idx, f"Phase B-{phase_b_round}",
+                                 total_done=_total_done(), total_target=_total_target(),
+                                 doc_pool_size=len(doc_pool),
+                                 sub_failed=len(sub_skipped), dead_terminated=dead_terminated)
+                    success, reason = _do_publish(f_name, doc_path, round_label, is_retry=True)
+                    if success:
+                        sent_accounts_set.add(f_name)
+                        _append_sent_excel(f_name)
+                        _remove_from_fail_list(f_name)
+                        _append_summary(f_name, sub_round_id, "补发成功时间")
+                        log(f"  ✓ 补发成功: {f_name}")
+                    else:
+                        _handle_failure(f_name, reason, sub_fail_count, sub_skipped)
+
+            log(f"\n{log_label}第 {big_round} 大循环 / 第 {sub_idx} 小轮 结束。本小轮跳过 {len(sub_skipped)} 个(下小轮恢复)。硬终止累计 {len(dead_terminated)} 个")
+            sent_accounts_set.clear()
+            _clear_round_sheets()
+
+        log(f"\n{'='*20} {log_label}第 {big_round} 大循环 结束 {'='*20}")
+
+    write_status(big_round, sub_rounds, "结束",
+                 total_done=_total_done(), total_target=_total_target(),
+                 doc_pool_size=len(doc_pool),
+                 sub_failed=0, dead_terminated=dead_terminated,
+                 extra=f"{log_label}{big_round} 大循环跑完。最终硬终止 {len(dead_terminated)} 个")
+
+    return {
+        "acc_count": acc_count,
+        "dead_terminated": dead_terminated,
+        "doc_pool": doc_pool,
+        "ok_count": ok_count,
+        "fail_count": fail_count,
+        "total_notices": total_notices,
+        "total_violations": total_violations,
+        "total_alerts": total_alerts,
+        "big_rounds": big_round,
+    }
+
+
 # ========== 主流程 ==========
 
 def main():
@@ -1778,297 +1989,79 @@ def main():
         if skipped:
             log(f"已排除 {skipped} 个永不发文账号: {EXCLUDE_ACCOUNTS}")
 
-    # 读取账号配置.xlsx - 待补漏sheet（优先级高于白名单）
-    pending_mode = False
-    pending_records = []  # [(name, missing, doc, gen_ts)]
+    # 读取账号配置.xlsx - 白名单 sheet (B 列可指定账号独立配额)
+    quota_map = {}
     try:
-        pending_records = _read_pending_list()
-        if pending_records:
-            # 用素材mtime判断缺哥是否已换新素材
-            latest_gen = max((r[3] for r in pending_records if r[3]), default="")
-            has_newer_material = False
-            if latest_gen:
-                try:
-                    gen_dt = datetime.strptime(latest_gen, "%Y-%m-%d %H:%M:%S")
-                    for d in docs:
-                        try:
-                            if datetime.fromtimestamp(os.path.getmtime(d)) > gen_dt:
-                                has_newer_material = True
-                                break
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            if has_newer_material:
-                log(f"检测到素材比待补漏记录新，作废待补漏，跑新一轮")
-                _clear_pending_list()
-                pending_records = []
-            else:
-                pending_mode = True
-                log(f"进入补漏模式: 待补漏 {len(pending_records)} 个账号，共 {sum(r[1] for r in pending_records)} 篇")
-    except Exception as _pe:
-        log(f"读取待补漏失败: {_pe}")
-
-    quota_map = {}  # {账号: 独立配额}；为空时走全局配额
-    if pending_mode:
-        # 补漏模式：直接信任"待补漏"表里的账号名 + 各自漏发数作为配额
-        accounts = [r[0] for r in pending_records]
-        for name, missing, _d, _t in pending_records:
-            quota_map[name] = missing
-        log(f"补漏模式：直接采用待补漏表中的 {len(accounts)} 个账号 {accounts}")
-        log(f"补漏模式配额: {quota_map}")
-    else:
-        # 读取账号配置.xlsx - 白名单sheet（有内容则只跑白名单内的账号，B列可指定账号独立配额）
-        try:
-            _wl_map = _read_whitelist_with_quota()
-            if _wl_map:
-                accounts = [a for a in accounts if any(inc in a or a in inc for inc in _wl_map.keys())]
-                # 把侧边栏实际账号名映射到白名单配额
-                for a in accounts:
-                    for inc, q in _wl_map.items():
-                        if inc in a or a in inc:
-                            quota_map[a] = q
-                            break
-                log(f"账号配置.xlsx[白名单]已加载，白名单 {len(_wl_map)} 个，过滤后剩 {len(accounts)} 个账号")
-                log(f"白名单配额: {quota_map}")
-        except Exception as _e:
-            log(f"读取账号配置.xlsx[白名单]失败: {_e}")
+        _wl_map = _read_whitelist_with_quota()
+        if _wl_map:
+            accounts = [a for a in accounts if any(inc in a or a in inc for inc in _wl_map.keys())]
+            for a in accounts:
+                for inc, q in _wl_map.items():
+                    if inc in a or a in inc:
+                        quota_map[a] = q
+                        break
+            log(f"账号配置.xlsx[白名单]已加载,白名单 {len(_wl_map)} 个,过滤后剩 {len(accounts)} 个账号")
+            log(f"白名单配额: {quota_map}")
+    except Exception as _e:
+        log(f"读取账号配置.xlsx[白名单]失败: {_e}")
 
     if not accounts:
         log("错误: 未找到任何账号")
         main_ws.close()
         return
 
-    # 配额：白名单/补漏有独立配额就用独立配额；否则全局 = 总篇数 ÷ 账号数
-    if quota_map:
-        total_quota = sum(quota_map.get(a, 1) for a in accounts)
-        log(f"本次发布: {len(accounts)} 个账号，{len(docs)} 篇文档，按独立配额共 {total_quota} 篇")
-        quota = None  # 标记走 quota_map
-    else:
+    # 没有白名单独立配额 → 全局 = 总篇数 ÷ 账号数
+    if not quota_map:
         quota = len(docs) // len(accounts) if len(accounts) > 0 else 1
         quota = max(quota, 1)
-        log(f"本次发布: {len(accounts)} 个账号，{len(docs)} 篇文档，每账号配额 {quota} 篇")
+        quota_map = {a: quota for a in accounts}
+        log(f"本次发布: {len(accounts)} 个账号,{len(docs)} 篇文档,每账号配额 {quota} 篇")
+    else:
+        total_quota = sum(quota_map.get(a, 1) for a in accounts)
+        log(f"本次发布: {len(accounts)} 个账号,{len(docs)} 篇文档,按独立配额共 {total_quota} 篇")
 
-    doc_pool = list(docs)          # 待发文章池
-    acc_count = {a: 0 for a in accounts}  # 各账号已发成功数
-    acc_fail_count = {}   # 各账号累计失败次数
-    skipped_accounts = [] # 超过MAX_RETRY被放弃的账号
-    MAX_ACC_RETRY = 5
-    ok_count = fail_count = 0
-    round_num = 0
+    doc_pool = list(docs)
 
-    MAX_RETRY_PER_ROUND = 3  # 轮末补发最多重试次数
+    # 调用死磕主循环 (文章 3 小轮 / 大循环 + 外层无限磕)
+    result = run_death_grip(
+        accounts=accounts,
+        per_account_quota=quota_map,
+        doc_pool=doc_pool,
+        main_ws=main_ws,
+        sub_rounds=3,
+        max_fail_per_sub=3,
+        sent_accounts_set=sent_accounts_set,
+        credit_records=credit_records,
+        fail_records=fail_records,
+        success_accounts=success_accounts,
+    )
 
-    def _do_publish(name, doc, current_round, is_retry=False):
-        """发一篇的完整流程。返回 (success:bool, reason:str, fatal:bool)。
-           fatal=True 表示账号找不到/失登等，此次计入失败但不计fail_count重复。"""
-        nonlocal ok_count, fail_count, total_notices, total_violations, total_alerts
-        log(f"\n  [剩余 {len(doc_pool)} 篇]  {'[补发]' if is_retry else ''} {name}  ->  {os.path.basename(doc)}")
-
-        pos = scroll_find_account(main_ws, name)
-        if not pos:
-            log(f"  X 未找到账号: {name}")
-            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, "侧边栏未找到"))
-            fail_count += 1
-            return False, "侧边栏未找到", False
-
-        log(f"  点击坐标({pos['x']},{pos['y']})")
-        click(main_ws, pos["x"], pos["y"], 20)
-        time.sleep(WAIT_LOAD)
-
-        ws_url = find_account_webview(main_ws, name)
-        if not ws_url:
-            log("  X 找不到 webview")
-            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, "webview匹配失败"))
-            fail_count += 1
-            close_current_tab(main_ws)
-            acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-            return False, "webview匹配失败", False
-
-        page_url = get_url_from_ws(ws_url)
-        if "login" in page_url:
-            log("  X 账号失登")
-            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, "失登"))
-            fail_count += 1
-            close_current_tab(main_ws)
-            acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-            return False, "失登", False
-
-        nc, vc = check_system_notice(ws_url, name)
-        total_notices += nc
-        total_violations += vc
-        time.sleep(2)
-
-        _d_wait = random.randint(8, 20)
-        try:
-            credit_buf = []
-            success, reason = publish_article(ws_url, doc, main_ws, name, credit_buf)
-            if credit_buf and credit_buf[0] is not None:
-                credit_records[name] = credit_buf[0]
-            if success:
-                move_to_sent(doc)
-                if doc in doc_pool:
-                    doc_pool.remove(doc)
-                acc_count[name] = acc_count.get(name, 0) + 1
-                acc_fail_count.pop(name, None)
-                ok_count += 1
-                success_accounts.add(name)
-                total_alerts += check_reading_stats(ws_url, name)
-                return True, "", False
-            else:
-                log(f"  X 发布失败: {reason}")
-                fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, reason))
-                fail_count += 1
-                acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-                return False, reason, False
-        except Exception as e:
-            log(f"  X 异常: {e}")
-            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, f"异常: {e}"))
-            fail_count += 1
-            acc_fail_count[name] = acc_fail_count.get(name, 0) + 1
-            return False, f"异常: {e}", False
-        finally:
-            close_current_tab(main_ws)
-            log(f"  篇间等待 {_d_wait} 秒...")
-            time.sleep(_d_wait)
-
-    def _q(a):  # 取账号配额
-        return quota_map.get(a, quota) if quota_map else quota
-
-    while doc_pool and any(acc_count.get(a, 0) < _q(a) for a in accounts):
-        round_num += 1
-        # 本轮参与的账号：未满配额 且 不在 sent_accounts_set（本轮已发）里
-        round_accounts = [a for a in accounts if acc_count.get(a, 0) < _q(a) and a not in sent_accounts_set]
-        if not round_accounts:
-            break
-        if len(doc_pool) < len(round_accounts):
-            round_accounts = round_accounts[:len(doc_pool)]
-
-        log(f"\n{'='*30} 第 {round_num} 轮 Phase 1（正常发），{len(round_accounts)} 个账号 {'='*30}")
-
-        # 本轮随机打乱文章池，给每个账号分一篇
-        random.shuffle(doc_pool)
-        round_pairs = list(zip(round_accounts, doc_pool[:len(round_accounts)]))
-
-        for name, doc in round_pairs:
-            success, reason, _ = _do_publish(name, doc, round_num, is_retry=False)
-            if success:
-                sent_accounts_set.add(name)
-                _append_sent_excel(name)
-                _append_summary(name, round_num, "发文时间")
-            else:
-                # 失败记录到 失败列表 + 发文汇总
-                _append_fail_list(name, reason, os.path.basename(doc), round_num)
-                _append_summary(name, round_num, "失败时间")
-                if acc_fail_count.get(name, 0) >= MAX_ACC_RETRY:
-                    log(f"  ! 账号累计失败{MAX_ACC_RETRY}次，放弃: {name}")
-                    if name in accounts:
-                        accounts.remove(name)
-                    skipped_accounts.append(name)
-                    # 注：不删 acc_count，保留已发计数给运行结束时的漏发计算用
-
-        # === Phase 2：本轮末补发失败列表 ===
-        log(f"\n{'='*20} 第 {round_num} 轮 Phase 2（补发失败） {'='*20}")
-        retry_round = 0
-        while retry_round < MAX_RETRY_PER_ROUND:
-            pending = [f for f in _read_fail_list() if f[4] == round_num and f[0] not in sent_accounts_set]
-            if not pending:
-                log(f"  补发列表已清空，本轮齐活")
-                break
-            retry_round += 1
-            log(f"\n  补发 {retry_round}/{MAX_RETRY_PER_ROUND} 次，待补 {len(pending)} 个")
-            for f_name, f_reason, f_docname, f_ts, f_rnd in pending:
-                if f_name not in accounts:
-                    continue  # 已被放弃
-                # 找原文稿；找不到就从 doc_pool 随机一篇
-                doc_path = None
-                for d in doc_pool:
-                    if os.path.basename(d) == f_docname:
-                        doc_path = d
-                        break
-                if doc_path is None:
-                    if not doc_pool:
-                        log(f"  X doc_pool空，无法补发 {f_name}")
-                        continue
-                    doc_path = random.choice(doc_pool)
-                success, reason, _ = _do_publish(f_name, doc_path, round_num, is_retry=True)
-                if success:
-                    sent_accounts_set.add(f_name)
-                    _append_sent_excel(f_name)
-                    _remove_from_fail_list(f_name)
-                    _append_summary(f_name, round_num, "补发成功时间")
-                    log(f"  ✓ 补发成功: {f_name}")
-                else:
-                    if acc_fail_count.get(f_name, 0) >= MAX_ACC_RETRY:
-                        log(f"  ! 账号累计失败{MAX_ACC_RETRY}次，放弃: {f_name}")
-                        if f_name in accounts:
-                            accounts.remove(f_name)
-                        skipped_accounts.append(f_name)
-                        # 注：不删 acc_count，保留已发计数给运行结束时的漏发计算用
-
-        # === Phase 3：清空"本轮已发"+"失败列表"，进下一轮 ===
-        # 补发后仍残留的失败→这些账号放弃，清空sheet进下轮
-        residual = [f for f in _read_fail_list() if f[4] == round_num and f[0] not in sent_accounts_set]
-        if residual:
-            for f_name, _, _, _, _ in residual:
-                if f_name in accounts:
-                    log(f"  ! 补发仍失败，放弃本轮账号: {f_name}")
-                    accounts.remove(f_name)
-                    skipped_accounts.append(f_name)
-                    # 注：不删 acc_count，保留已发计数给运行结束时的漏发计算用
-        _clear_round_sheets()
-        sent_accounts_set.clear()
-        log(f"\n第 {round_num} 轮结束，已清空本轮记录")
+    acc_count        = result["acc_count"]
+    dead_terminated  = result["dead_terminated"]
+    doc_pool         = result["doc_pool"]
+    ok_count         = result["ok_count"]
+    fail_count       = result["fail_count"]
+    total_notices    = result["total_notices"]
+    total_violations = result["total_violations"]
+    total_alerts     = result["total_alerts"]
 
     if doc_pool:
-        log(f"\n! 文档池还剩 {len(doc_pool)} 篇未发完（留给手工发布）")
+        log(f"\n! 文档池还剩 {len(doc_pool)} 篇未发完(死磕已无可用账号)")
         for d in doc_pool:
             log(f"  未发: {os.path.basename(d)}")
 
-    if skipped_accounts:
-        log(f"\n! 以下账号累计失败{MAX_ACC_RETRY}次已放弃，请手工发布:")
-        for a in skipped_accounts:
-            log(f"  {a}")
-
-    # 写最终失败记录（放弃账号+本次从未成功的账号）
+    # 写最终失败记录
     final_fails = [(ts, n, r) for ts, n, r in fail_records
-                   if (n not in success_accounts) or (n in skipped_accounts)]
+                   if (n not in success_accounts) or (n in dead_terminated)]
     write_fail_excel(final_fails)
 
-    # ===== 待补漏 / 补漏历史 =====
-    try:
-        gen_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        new_pending = []
-        for name in accounts + skipped_accounts:
-            q = quota_map.get(name, quota or 0)
-            if not q:
-                continue
-            missing = q - acc_count.get(name, 0)
-            if missing > 0 and not any(n == name for n, _, _, _ in new_pending):
-                new_pending.append((name, missing, "", gen_ts))
-
-        if pending_mode:
-            # 补发轮：无论结果如何，跑完就清空待补漏，成败都写入补漏历史
-            hit_names = set(quota_map.keys())
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            history_rows = []
-            for orig_name, orig_missing, orig_doc, orig_ts in pending_records:
-                matched = next((a for a in hit_names if orig_name in a or a in orig_name), None)
-                actual_done = acc_count.get(matched, 0) if matched else 0
-                history_rows.append((today_str, orig_name, actual_done, orig_ts))
-            if history_rows:
-                _append_history(history_rows)
-            _clear_pending_list()
-            done_cnt = sum(1 for r in history_rows if r[2] > 0)
-            log(f"\n✓ 补发轮结束：{len(history_rows)} 条已写入补漏历史（补齐 {done_cnt} 个），待补漏已清空，等待新一轮")
-        else:
-            if new_pending:
-                _write_pending_list(new_pending)
-                log(f"\n本次漏发 {len(new_pending)} 个账号共 {sum(r[1] for r in new_pending)} 篇，已写入待补漏；下次点 go 自动补齐")
-            else:
-                _clear_pending_list()  # 万一残留
-    except Exception as _pe:
-        log(f"待补漏处理出错: {_pe}")
+    # ========== 收尾:硬终止账号汇报 ==========
+    if dead_terminated:
+        log(f"\n★ 4 类硬终止账号 {len(dead_terminated)} 个 (已写入'硬终止账号'sheet,需人工处理):")
+        for name, (reason, ts, cnt) in dead_terminated.items():
+            log(f"  - {name}\t{reason}\t本次已发 {cnt} 篇\t{ts}")
+    else:
+        log("\n★ 无硬终止账号,本次全部账号正常完成或仍在 active")
 
     # 排序"发文汇总"：同账号的多轮放一起，按轮次升序
     _sort_summary_by_account()
@@ -2090,26 +2083,19 @@ def main():
         "=" * 60,
         f"运行汇总 - {run_time_str}",
         "=" * 60,
-        f"类型    : 图文文章发布",
+        f"类型    : 文章发布(死磕模式)",
         f"报告目录: {RUN_REPORT_DIR}",
         "",
-        f"成功发布: {ok_count} 个账号",
-        f"最终失败: {len(final_fail_names)} 个账号",
-        f"放弃账号: {len(skipped_accounts)} 个",
+        f"成功发布: {ok_count} 篇",
+        f"中途失败: {fail_count} 次(已重试到底)",
+        f"硬终止号: {len(dead_terminated)} 个 (失登/封号/禁言/找不到)",
+        f"文档剩余: {len(doc_pool)} 篇",
     ]
-    if final_fail_names:
+    if dead_terminated:
         summary_lines.append("")
-        summary_lines.append("最终失败账号 (需手工处理):")
-        seen_fail = set()
-        for _, n_f, r_f in final_fails:
-            if n_f not in seen_fail:
-                seen_fail.add(n_f)
-                summary_lines.append(f"  - {n_f}: {r_f}")
-    if skipped_accounts:
-        summary_lines.append("")
-        summary_lines.append("放弃账号 (失败5次):")
-        for a in skipped_accounts:
-            summary_lines.append(f"  - {a}")
+        summary_lines.append("硬终止账号 (需人工处理):")
+        for name, (reason, ts, cnt) in dead_terminated.items():
+            summary_lines.append(f"  - {name}	{reason}	本次已发 {cnt} 篇")
     summary_lines.extend([
         "",
         f"系统通知: {total_notices} 条  → 系统通知.txt",
@@ -2124,7 +2110,7 @@ def main():
 
     main_ws.close()
     log(f"\n{'='*50}")
-    log(f"完成! 成功:{ok_count}  最终失败:{len(final_fail_names)}  放弃账号:{len(skipped_accounts)}")
+    log(f"完成! 成功:{ok_count}  最终失败:{len(final_fail_names)}  硬终止:{len(dead_terminated)}")
     log("\n" + summary_text)
     log(f"{'='*50}")
 
