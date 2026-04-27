@@ -969,6 +969,108 @@ def find_account_webview(main_ws, name):
     return None
 
 
+def _search_box_set(main_ws, value):
+    """侧边栏搜索框设置值(空字符串=清空)。React-friendly: 用原型 setter 触发 input/change 事件。"""
+    val_json = json.dumps(value)
+    return js(main_ws, f"""
+    (function(){{
+        var inputs = document.querySelectorAll('input');
+        for(var i=0;i<inputs.length;i++){{
+            var ph = inputs[i].getAttribute('placeholder') || '';
+            if(ph.indexOf('账号') !== -1 || ph.indexOf('手机号') !== -1){{
+                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(inputs[i], '');
+                inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
+                if({val_json}.length > 0){{
+                    setter.call(inputs[i], {val_json});
+                    inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
+                    inputs[i].dispatchEvent(new Event('change', {{bubbles:true}}));
+                }}
+                return 'ok';
+            }}
+        }}
+        return 'no_input';
+    }})()
+    """, 50)
+
+
+def _locate_filtered_account(main_ws, name):
+    """搜索框过滤后,直接抓第一个匹配账号的中心坐标(viewport 相对)。"""
+    name_json = json.dumps(name)
+    pos = js(main_ws, f"""
+    (function(){{
+        var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+        for(var i=0;i<items.length;i++){{
+            var t = items[i].textContent.trim();
+            if(t === {name_json} || t.startsWith({name_json})){{
+                items[i].scrollIntoView({{block:'center', behavior:'instant'}});
+                var r = items[i].getBoundingClientRect();
+                if(r.width > 0)
+                    return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
+            }}
+        }}
+        return null;
+    }})()
+    """, 51)
+    if not pos:
+        return None
+    return json.loads(pos)
+
+
+def find_or_reopen_webview(main_ws, name, reopen_attempts=2):
+    """虚拟滚动底部账号 webview partition 不渲染时,通过侧边栏搜索框定位账号让 webview 重建。
+
+    流程:正常 find_account_webview 失败 → 关 tab → 搜索框输入账号名 → 等过滤 →
+    抓过滤后的账号坐标 → click → 等更长时间 → 再尝试 find_account_webview。
+    搜索框过滤后只剩匹配项渲染在 DOM 顶部,不再受虚拟滚动影响。
+    """
+    ws_url = find_account_webview(main_ws, name)
+    if ws_url:
+        return ws_url
+
+    for attempt in range(reopen_attempts):
+        log(f"  webview partition 失败,搜索框重建 {attempt+1}/{reopen_attempts}: 输入 \"{name}\"")
+        try:
+            close_current_tab(main_ws)
+        except Exception as e:
+            log(f"  关 tab 异常(忽略): {e}")
+        time.sleep(1.0)
+
+        # 用搜索框过滤
+        rs = _search_box_set(main_ws, name)
+        if rs != 'ok':
+            log("  搜索框定位失败,降级用 scroll_find_account")
+            pos = scroll_find_account(main_ws, name)
+        else:
+            time.sleep(1.5)  # 等过滤结果 React 渲染完
+            pos = _locate_filtered_account(main_ws, name)
+            if not pos:
+                log("  搜索过滤后仍找不到,降级用 scroll_find_account")
+                _search_box_set(main_ws, "")  # 清空恢复列表
+                time.sleep(0.5)
+                pos = scroll_find_account(main_ws, name)
+
+        if not pos:
+            log(f"  搜索/滚动都找不到 {name},重建中止")
+            _search_box_set(main_ws, "")
+            return None
+
+        click(main_ws, pos["x"], pos["y"], 20)
+        time.sleep(WAIT_LOAD + 2)  # 比首次多等 2 秒,给虚拟滚动 lazy render 留余地
+
+        ws_url = find_account_webview(main_ws, name)
+
+        # 不论成败,清空搜索框还原列表(避免影响后续账号)
+        _search_box_set(main_ws, "")
+        time.sleep(0.3)
+
+        if ws_url:
+            log(f"  webview 重建成功(尝试 {attempt+1})")
+            return ws_url
+
+    return None
+
+
 def get_url_from_ws(ws_url):
     try:
         wsc = ws_connect(ws_url, timeout=4)
@@ -2036,7 +2138,7 @@ def run_death_grip(
         click(main_ws, pos["x"], pos["y"], 20)
         time.sleep(WAIT_LOAD)
 
-        ws_url = find_account_webview(main_ws, name)
+        ws_url = find_or_reopen_webview(main_ws, name)
         if not ws_url:
             log("  X 找不到 webview")
             log_failure(name, "webview匹配失败")
