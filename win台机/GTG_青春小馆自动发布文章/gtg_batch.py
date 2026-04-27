@@ -1935,8 +1935,14 @@ def run_death_grip(
                   if a not in dead_terminated
                   and acc_count.get(a, 0) < per_account_quota.get(a, 0)]
         if not active:
-            log(f"\n{log_label}所有账号都已满 quota,死磕结束")
-            break
+            log(f"\n{log_label}所有账号配额暂时满,等 60s 重扫素材池(只 doc_pool 空 / Ctrl+C 才停)...")
+            time.sleep(60)
+            cur_set = set(doc_pool)
+            new_docs = [d for d in get_docs() if d not in cur_set]
+            if new_docs:
+                log(f"  + 发现 {len(new_docs)} 篇新素材,加入文档池")
+                doc_pool.extend(new_docs)
+            continue
 
         big_round += 1
         log(f"\n{'='*20} {log_label}第 {big_round} 大循环 开始 (active {len(active)} 账号,文档池 {len(doc_pool)} 篇) {'='*20}")
