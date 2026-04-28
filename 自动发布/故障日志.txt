@@ -28,34 +28,42 @@
 未修
 ============================================================
 
---- [2026-04-28 21:00] [neo] [跨机网络] ---
-现象: Shadowrocket 启动 / 重启 / 切节点会把 100.64.0.0/10 路由抢回物理网卡(原意是 RFC6598 段 bypass),把 ts 流量全吞 → 所有跨机连通(ICMP / SSH 22 / 任意 ts 端口)同步死
-影响: 今晚台机 → neo 多次"通了又不通",每次都是 SR 状态变化触发;缺哥要求"固定状态"
-上下文: 21:00 前小齐已临时 route flush 把 100.64/10 指回 utun4,当前通,但 SR 下次重启会复发
-推测根因: SR 路由设置默认把 100.64/10 当 RFC6598 bypass 引到物理网卡,没考虑 Tailscale 用同一段
-谁记的: 绣虎(转告) — 出自小齐自查 lsof + 路由表
-状态: 已修(LaunchAgent 兜底) + SR 配置源头修待落
-
-★ 小齐补 [2026-04-28 21:02]:
-  已上线兜底,不再依赖手动 route flush。
-  落地物:
-    /Users/kenchoios/bin/ts_route_guard.sh  (扫 100.64/10,不在 utun4 就强制改回)
-    ~/Library/LaunchAgents/com.kenchoi.tsrouteguard.plist  (StartInterval=10s, RunAtLoad)
-    /etc/sudoers.d/ts_route_guard  (kenchoios NOPASSWD: /sbin/route 只这一条命令)
-    /Users/kenchoios/Library/Logs/ts_route_guard.log  (自愈记录)
-  自愈验证: 故意 sudo route change 100.64/10 → 192.168.50.1,12 秒后日志记 "fixed: en0 -> utun4",
-           nc air:22 succeeded。从此最长不通窗口 ≤ 10 秒。
-  适用: SR 启动/重启/切节点/订阅刷新/版本升级 全场景兜底。
-
-修法(SR 配置源头修,待落,人工做):
-  Shadowrocket → 设置 → 路由 → 把 100.64.0.0/10 改成 "DIRECT 到 utun4"
-  或干脆从 tun-excluded-routes 移除该段,让 Tailscale 自己接管
-  做完后兜底脚本仍保留(防 SR 版本升级配置丢失)
-落地版本: SR 端配置,跟仓库代码无关
+(空)
 
 ============================================================
 已修
 ============================================================
+
+--- [2026-04-28 21:00] [neo / 跨机网络] [全队连通] ---
+现象: 台机 → neo 周期性"通了又不通",ICMP / SSH / 任意 ts 端口同步死
+影响: 21:00 前晚上反复,缺哥要求"固定状态"
+上下文: SR 启动 / 重连 / 订阅刷新会把 100.64.0.0/10 路由重写到 192.168.50.1 (en0/物理网卡);Tailscale daemon 又会反向修回 utun4 — 两边轮流写 = 周期性时通时断
+推测根因: SR 默认把 100.64/10 当 RFC6598 段 bypass 引到物理网卡,没考虑 Tailscale 用同一段
+谁记的: 绣虎(转告)+ 小齐(自查 lsof + 路由表 + 固化)
+状态: 已修(LaunchAgent 兜底已上线)
+
+★ 修后(neo 端,小齐 21:02 落):
+落地物:
+  /Users/kenchoios/bin/ts_route_guard.sh                 (扫 100.64/10,不在 utun4 就强制改回)
+  ~/Library/LaunchAgents/com.kenchoi.tsrouteguard.plist  (StartInterval=10s, RunAtLoad)
+  /etc/sudoers.d/ts_route_guard                          (kenchoios NOPASSWD: /sbin/route 仅此一条)
+  /Users/kenchoios/Library/Logs/ts_route_guard.log       (自愈记录)
+自愈验证: 故意 sudo route change 100.64/10 → 192.168.50.1,12 秒后日志记 "fixed: en0 -> utun4",nc air:22 succeeded
+最长不通窗口 ≤ 10 秒;适用 SR 启动 / 重启 / 切节点 / 订阅刷新 / 版本升级 全场景
+
+补充修法(SR 配置源头,待人工做;做完兜底脚本仍保留防 SR 升级丢配置):
+  Shadowrocket → 设置 → 路由 → 100.64.0.0/10 改 "DIRECT 到 utun4"
+  或从 tun-excluded-routes 移除该段,让 Tailscale 自己接管
+
+落地版本: neo 系统级,跟仓库代码无关
+落地时间: 2026-04-28 21:00
+落地人: 小齐
+
+Win 台机豁免: Win Tailscale 用 per-host /32 路由(每 peer 单独一条挂 Tailscale 接口),没 100.64/10 聚合段 → v2rayN 不写这种路由,根因不存在,无须守护脚本
+
+附带存档(同时段发现):
+  台机 SSHD 监听 2222 不是 22 — 跨机连台机要 ssh -p 2222 kench@100.86.79.39
+
 
 --- [2026-04-28 12:00] [全 4 mac 文章定时] [文章定时] ---
 现象: gtg_timer.py 完全没搜索框 fallback,底部账号 webview partition 挂时死循环
