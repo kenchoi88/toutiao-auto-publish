@@ -287,7 +287,7 @@ def main():
         all_names = collect_accounts(main_ws)
         filtered = [n for n in all_names if n not in skip and n not in EXCLUDE_ACCOUNTS]
         log(f"过滤后发文账号: {len(filtered)}")
-        accounts_quota = [(n, 2) for n in filtered]   # 缺哥 2026-04-28: 文稿不够,只发早+中,晚窗取消(quota=2,q>=3 永不命中)
+        accounts_quota = [(n, 3) for n in filtered]   # 早+中+晚 全开
 
     if not accounts_quota:
         log("错误: 没有可发文账号")
