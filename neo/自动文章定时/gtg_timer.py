@@ -366,12 +366,16 @@ def scroll_find_account(main_ws, name):
                 for(var i=0;i<items.length;i++){{
                     var t = items[i].textContent.trim();
                     if(t === {name_json} || t.startsWith({name_json})){{
-                        var r = items[i].getBoundingClientRect();
+                        // patch_lastacc: items[i] 是外层 account row (cliclick 不响应),
+                        // 真可点击 row 是其子树中的 horizontalAccount-* (x≈83 中心).
+                        var hor = items[i].querySelector('[class*="horizontalAccount"]');
+                        var row = (hor && hor.getBoundingClientRect().width>=60) ? hor : items[i];
+                        var r = row.getBoundingClientRect();
                         if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
                             return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
-                        // 坐标不在视口内，再滚一次
-                        items[i].scrollIntoView({{block:'center', behavior:'instant'}});
-                        r = items[i].getBoundingClientRect();
+                        // 坐标不在视口内，再滚一次 (基于 row)
+                        row.scrollIntoView({{block:'center', behavior:'instant'}});
+                        r = row.getBoundingClientRect();
                         if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
                             return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
                     }}
@@ -402,32 +406,24 @@ def scroll_find_account(main_ws, name):
             else:
                 same_count = 0
 
-    # 滚动找不到，尝试搜索框输入账号名过滤
-    log(f"  滚动未找到账号，尝试搜索框输入: {name}")
-    search_pos = js(main_ws, """
-    (function(){
+    # 滚动找不到,CDP JS 注入搜索框过滤(neo 同款 — 不需罐头前台,VSCode 占着不影响)
+    # 直接调 React/Vue controlled input 内部 setter + dispatch input/change,绕开物理键盘
+    log(f"  滚动未找到账号,CDP 注入搜索框过滤: {name}")
+    filled = js(main_ws, f"""
+    (function(){{
         var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
-        if(!s) return null;
-        var r = s.getBoundingClientRect();
-        if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
-        return null;
-    })()
+        if(!s) return 'no_input';
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(s, {name_json});
+        s.dispatchEvent(new Event('input', {{bubbles:true}}));
+        s.dispatchEvent(new Event('change', {{bubbles:true}}));
+        return 'ok';
+    }})()
     """, 14)
-    if not search_pos:
+    if filled != 'ok':
         return None
-    sp = json.loads(search_pos)
-    # 点搜索框，清空，用osascript真实键入账号名（CDP insertText不触发过滤）
-    click(main_ws, sp["x"], sp["y"], 15)
-    time.sleep(0.3)
-    subprocess.run(["osascript", "-e", f"""
-tell application "System Events"
-    keystroke "a" using {{command down}}
-    delay 0.2
-    keystroke {json.dumps(name)}
-end tell
-"""], capture_output=True)
     time.sleep(1.5)
-    # 再取坐标
+    # 取过滤后的目标账号坐标
     pos = js(main_ws, f"""
     (function(){{
         var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
@@ -445,16 +441,18 @@ end tell
     """, 18)
     if pos:
         log(f"  搜索框过滤后找到账号: {name}")
-        # 清空搜索框，恢复完整列表
-        click(main_ws, sp["x"], sp["y"], 19)
-        time.sleep(0.2)
-        subprocess.run(["osascript", "-e", """
-tell application "System Events"
-    keystroke "a" using {command down}
-    delay 0.1
-    key code 51
-end tell
-"""], capture_output=True)
+        # CDP 注入清空搜索框,恢复完整列表
+        js(main_ws, """
+        (function(){
+            var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
+            if(!s) return 'no_input';
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(s, '');
+            s.dispatchEvent(new Event('input', {bubbles:true}));
+            s.dispatchEvent(new Event('change', {bubbles:true}));
+            return 'ok';
+        })()
+        """, 19)
         time.sleep(0.5)
         return json.loads(pos)
     return None
