@@ -59,7 +59,7 @@ type: project
 - 改动:30s timeout 内 弹窗未出 → 重读按钮坐标 + ensure_gtg_top + 再 cliclick(共 2-3 次)再判失败
 - 理由:Mac 散点 cliclick 不响应 4 天 77 次,加重试救大半
 
-### P8 — 抄 win 8 处搜索框 fallback(只 mac 文章定时)
+### P8 — 抄搜索框 fallback(全队 文章定时 必含,非可选)
 - 位置:scroll_find_account / find_account_webview
 - 改动:把 win 的 `find_or_reopen_webview` + `_search_box_set` + 搜索框过滤 移植到 mac gtg_timer.py
 - 理由:mac 文章定时全无搜索框,底部账号 webview partition 挂 → 死循环 N 圈无救

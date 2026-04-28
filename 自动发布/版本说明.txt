@@ -88,6 +88,52 @@ v1101 — 2026-04-28(基线版本)
     ▸ 汇总报告.txt(收尾)
 
 ============================================================
+v1101.2 — 2026-04-29 凌晨(末位账号 CDP 注入彻底修复)
+============================================================
+
+【修了哪些 bug】
+
+  Bug 1 — 末位账号搜索框 fallback 用 cliclick + osascript keystroke 失效
+    现象:罐头侧边栏底部账号 cliclick (108,725) 不触发 webview 切换,partition 永远找不到
+         scroll_find_account 滚动失败后 fallback 到搜索框,但用 cliclick 点搜索框 +
+         osascript keystroke 输入账号名,在罐头不在前台 / VSCode 占着时不工作
+    影响:Air 海屿星辰一个账号 04-28 凌晨 5+ 大循环死磕 webview 找不到,5 篇文档堵死
+    修法:scroll_find_account 搜索框 fallback 段把 cliclick + osascript keystroke
+         整体替换成 CDP JS 注入(neo 同款):
+           var setter = Object.getOwnPropertyDescriptor(
+                          window.HTMLInputElement.prototype, 'value').set;
+           setter.call(s, 账号名);
+           s.dispatchEvent(new Event('input', {bubbles:true}));
+           s.dispatchEvent(new Event('change', {bubbles:true}));
+         直接调 React/Vue controlled input 内部 setter + dispatch input/change,
+         前端搜索过滤认作用户输入。完全不需要罐头在前台,VSCode 占着也不影响。
+    清空搜索框同款替换:setter.call(s, '') + dispatch input/change
+
+【实战印证】
+  04-29 01:06 阿良 CDP 实时注入到运行中的罐头(browser-level Target.attachToTarget,
+  不挤主脚本 page ws):
+    - 注入前: items.length=N, cliclick 落 (108,725), webview 不响应
+    - 注入后: items.length=1, cliclick 落 (108,459), webview 一次匹配成功
+    - 主脚本接连发出海屿星辰剩余 5 篇,295→300 全发完(连续 4 篇 (108,459) 一击命中)
+
+【影响】
+  - 末位账号 / 任何 cliclick 不响应位置的账号都能被搜索框过滤救活
+  - 搜索框 fallback 不再依赖罐头前台,后台可发
+  - 取消对 osascript keystroke 的依赖,跟 VSCode / 输入法 / 其它前台应用解耦
+
+【落地状态(2026-04-29)】
+  ✓ neo  — 小齐落
+  ✓ air  — 阿良落
+  ✓ win  — 绣虎之前已落桌面真版(本版 win/ = 桌面 cp)
+  ☐ mini — 东山待落
+  ☐ neo2 — 左右待落
+
+【说明】
+  - 本版 win/ 已 cp 桌面真版三大件,含 CDP 注入 + 关 tab 重建 partition L2 兜底
+  - 本版 mac/ 仅 README 占位,待 air + neo 推桌面真版到 air/, neo/ 分目录后,
+    绣虎以小齐 neo 版本为 mac source 合 v1101.2/mac/
+
+============================================================
 v1101.1 — 2026-04-28 下午(熔断重构)
 ============================================================
 
