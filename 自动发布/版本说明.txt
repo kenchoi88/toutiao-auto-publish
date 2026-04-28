@@ -1,0 +1,57 @@
+============================================================
+v1101 大统一基线 — 2026-04-28
+============================================================
+
+【命名约定】
+  XXX自动发布101版/         ← 今天首版,基线
+  XXX自动发布101.1版/       ← 下次大改,新建文件夹保留旧版
+  XXX自动发布101.2版/       ← 再下次
+
+【三大件】
+  微头条自动发布            ← 原 Mac 微头条 / Win GTG_青春小馆自动发布微头条
+  文章自动发布              ← 原 Mac 文章 / Win GTG_青春小馆自动发布文章
+  文章定时自动发布          ← 原 Mac 文章定时 / Win GTG_青春小馆定时自动发布
+
+【目录结构】
+  自动发布/
+    ├─ 微头条自动发布101版/
+    │   ├─ README.md           ← patches 列表
+    │   ├─ mac/gtg_batch.py    ← Mac 版本
+    │   ├─ mac/go.command      ← Mac 启动器
+    │   ├─ win/gtg_batch.py    ← Win 版本
+    │   └─ win/go.bat          ← Win 启动器
+    ├─ 文章自动发布101版/      (同结构)
+    └─ 文章定时自动发布101版/  (同结构,mac 用 gtg_timer.py + win 含 gtg_batch.py + gtg_timer.py)
+
+【v1101 含 10 个 patches】
+  P1  删 Step 3 主对话框 6s 硬等(macOS 26 NSOpenPanel 自动关失效)
+  P2  字数<50 → 重试 fill_dialog 一次(治冤杀夜间废文)
+  P3  ProseMirror 选择器取最长元素(治"内容为空"假阳性,首个永远是标题 placeholder 5 字)
+  P4  [DIAG] 抓"确认发布"按钮 DOM(只 文章 + 文章定时)
+  P5  ensure_gtg_top 强化:unhide + AXRaise + verify frontmost + 重试 3 次
+  P6  Win 飘屏外坐标兜底:webview 原点为负 → SetWindowPos 拉回(只 win)
+  P7  cliclick 重试 3 次(每次重 activate + 重读坐标)
+  P8  抄搜索框 fallback(只 文章定时,其它本就有)
+  P9  抄阅读量回查(只 文章定时,其它本就有)
+  P10 Stage 2 死磕加熔断(只 文章定时)
+
+【完成度】(2026-04-28 13:20)
+  机器       微头条          文章           文章定时
+  ------    ------------    -----------    -----------
+  mini      ✅ 全 v1101    ✅ 全 v1101    ✅ 全 v1101
+  neo2      ✅ 全 v1101    ✅ 全 v1101    ⏳ 跑中,等推
+  air       ⏳ 跑中,等推   ✅ 全 v1101    ✅ 全 v1101
+  win台机   ⏳ 跑中,等推   ⚠️ P2+P3      ⚠️ P2+P3(P5/P6/P7 待 Win 适配)
+  neo       ❌ SSH 死       ❌ SSH 死      ❌ SSH 死
+
+【待办】
+  - air 微头条 跑完 → 推 v1101 + 改名(Mac → 去前缀)
+  - neo2 文章定时 跑完 → 推 v1101 + 改名 + symlink 重建
+  - win 微头条 跑完 → 推 v1101 + 改名(GTG_青春小馆 → 标准名)
+  - win 三大件 → 补 P5(SetForegroundWindow)+ P6(SetWindowPos)+ P7(win32 mouse retry)
+  - neo SSH 修通后:全套 v1101 推三大件
+
+【相关】
+  - 详细 spec:shared_memory/project_v1101_spec.md
+  - 修复分工章程:shared_memory/project_claude_分工章程.md
+  - 待修清单:shared_memory/(本机 memory)
