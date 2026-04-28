@@ -1,0 +1,12 @@
+# 仓库只放代码,数据不入(各机本地保留)
+*.xlsx
+*.bak*
+__pycache__/
+*.pyc
+.DS_Store
+素材/
+已发送/
+运行报告/
+gtg_log.txt
+launchd.log
+当前状态.txt
