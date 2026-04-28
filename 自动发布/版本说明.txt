@@ -1,57 +1,103 @@
 ============================================================
-v1101 大统一基线 — 2026-04-28
+自动发布 — 版本说明
 ============================================================
 
-【命名约定】
-  XXX自动发布101版/         ← 今天首版,基线
-  XXX自动发布101.1版/       ← 下次大改,新建文件夹保留旧版
+【命名规则】
+  XXX自动发布101版/         ← 基线(本次首版)
+  XXX自动发布101.1版/       ← 后续修 bug,新建文件夹保留旧版
   XXX自动发布101.2版/       ← 再下次
 
 【三大件】
-  微头条自动发布            ← 原 Mac 微头条 / Win GTG_青春小馆自动发布微头条
-  文章自动发布              ← 原 Mac 文章 / Win GTG_青春小馆自动发布文章
-  文章定时自动发布          ← 原 Mac 文章定时 / Win GTG_青春小馆定时自动发布
+  微头条自动发布            (Mac 用 gtg_batch.py / Win 用 gtg_batch.py)
+  文章自动发布              (Mac 用 gtg_batch.py / Win 用 gtg_batch.py)
+  文章定时自动发布          (Mac 用 gtg_timer.py / Win 用 gtg_timer.py + gtg_batch.py)
 
 【目录结构】
   自动发布/
-    ├─ 微头条自动发布101版/
-    │   ├─ README.md           ← patches 列表
-    │   ├─ mac/gtg_batch.py    ← Mac 版本
-    │   ├─ mac/go.command      ← Mac 启动器
-    │   ├─ win/gtg_batch.py    ← Win 版本
-    │   └─ win/go.bat          ← Win 启动器
-    ├─ 文章自动发布101版/      (同结构)
-    └─ 文章定时自动发布101版/  (同结构,mac 用 gtg_timer.py + win 含 gtg_batch.py + gtg_timer.py)
+    ├─ XXX自动发布101版/
+    │   ├─ README.md           ← 该版本概要
+    │   ├─ mac/gtg_*.py + go.command
+    │   └─ win/gtg_*.py + go.bat
+    └─ ...
 
-【v1101 含 10 个 patches】
-  P1  删 Step 3 主对话框 6s 硬等(macOS 26 NSOpenPanel 自动关失效)
-  P2  字数<50 → 重试 fill_dialog 一次(治冤杀夜间废文)
-  P3  ProseMirror 选择器取最长元素(治"内容为空"假阳性,首个永远是标题 placeholder 5 字)
-  P4  [DIAG] 抓"确认发布"按钮 DOM(只 文章 + 文章定时)
-  P5  ensure_gtg_top 强化:unhide + AXRaise + verify frontmost + 重试 3 次
-  P6  Win 飘屏外坐标兜底:webview 原点为负 → SetWindowPos 拉回(只 win)
-  P7  cliclick 重试 3 次(每次重 activate + 重读坐标)
-  P8  抄搜索框 fallback(只 文章定时,其它本就有)
-  P9  抄阅读量回查(只 文章定时,其它本就有)
-  P10 Stage 2 死磕加熔断(只 文章定时)
+============================================================
+v1101 — 2026-04-28(基线版本)
+============================================================
 
-【完成度】(2026-04-28 13:20)
-  机器       微头条          文章           文章定时
-  ------    ------------    -----------    -----------
-  mini      ✅ 全 v1101    ✅ 全 v1101    ✅ 全 v1101
-  neo2      ✅ 全 v1101    ✅ 全 v1101    ⏳ 跑中,等推
-  air       ⏳ 跑中,等推   ✅ 全 v1101    ✅ 全 v1101
-  win台机   ⏳ 跑中,等推   ⚠️ P2+P3      ⚠️ P2+P3(P5/P6/P7 待 Win 适配)
-  neo       ❌ SSH 死       ❌ SSH 死      ❌ SSH 死
+【功能清单】
 
-【待办】
-  - air 微头条 跑完 → 推 v1101 + 改名(Mac → 去前缀)
-  - neo2 文章定时 跑完 → 推 v1101 + 改名 + symlink 重建
-  - win 微头条 跑完 → 推 v1101 + 改名(GTG_青春小馆 → 标准名)
-  - win 三大件 → 补 P5(SetForegroundWindow)+ P6(SetWindowPos)+ P7(win32 mouse retry)
-  - neo SSH 修通后:全套 v1101 推三大件
+  一、账号管理
+    ▸ 启动时收集罐头侧边栏所有账号(含虚拟滚动兜底)
+    ▸ 滚动收集失败 → 滚到底再扫一次补漏(lazy render 兜底)
+    ▸ 白名单优先,白名单为空时全收
+    ▸ 永久跳过 / 排除账号过滤
 
-【相关】
-  - 详细 spec:shared_memory/project_v1101_spec.md
+  二、文档导入
+    ▸ cliclick / win32 物理点"文档导入"按钮
+    ▸ NSOpenPanel(Mac)/ Win32 GetOpenFileName(Win)填路径打开
+    ▸ macOS 26 主对话框不自动关 → cliclick "打开"按钮兜底
+    ▸ 字数检测取最长 ProseMirror 元素(避开标题输入框 placeholder)
+    ▸ 字数 < 50 → 重试 fill_dialog 一次,救空文档冤杀
+
+  三、账号查找(底部账号兜底)
+    ▸ 滚动找账号
+    ▸ 滚动找不到 → 用搜索框输入账号名过滤(底部 lazy account 救命招)
+    ▸ 找到后 click → wait → 取 webview ws_url
+
+  四、罐头窗口管理
+    ▸ ensure_gtg_top 强化:最小化 Code/Safari 等遮挡者 + 取消罐头自身最小化
+    ▸ unhide(处理 Cmd-H Hidden 状态)
+    ▸ AXRaise 强制 reorder
+    ▸ verify frontmost(失败重试 3 次)
+    ▸ Win 飘屏外坐标 → SetWindowPos 拉回(只 win)
+
+  五、点击重试
+    ▸ cliclick 文档导入按钮 30s 内弹窗未出 → 重 activate + 重读坐标 + 再点(共 3 次)
+    ▸ 预览并发布按钮 30s 内确认弹窗未出 → 第 2 次预览(封面图慢的兜底,最多 5 次)
+    ▸ [DIAG] 抓"确认发布"按钮 DOM dump(数据驱动后续选择器优化)
+
+  六、账号状态检测
+    ▸ 失登:请登录 / 登录已失效 / 账号已下线 / 重新登录
+    ▸ 封号:账号已被封禁 / 账号异常 / 账号被封
+    ▸ 禁言:账号被禁言 / 发言受限 / 无法发布
+    ▸ 限流:操作频繁 / 请稍后再试
+    ▸ 4 类硬终止 → 永久放弃该账号 + 写终止表
+
+  七、信用分 + 头条首发
+    ▸ 读信用分(JS 抓 .credit-score 等)
+    ▸ 信用 ≥ 95 + 不在 NOFIRST_ACCOUNTS → 自动勾"头条首发"
+    ▸ 否则取消勾选
+
+  八、发文流程
+    ▸ 微头条:点"文档导入" → 选文件 → 字数/信用/首发 → 直接发布 → OK
+    ▸ 文章:点"文档导入" → 选文件 → 字数/信用/首发 → 预览并发布 → 确认发布 → OK
+    ▸ 文章定时:同文章 + 设置定时日期 + 排到云端
+
+  九、阅读量回查 + 高阅读告警
+    ▸ 发文成功后,导航到数据概览,读最近 3 篇阅读量
+    ▸ 任一 ≥ 5000 → 写"高阅读量提醒.txt"
+
+  十、熔断机制
+    ▸ Stage 1:连败 6 次 → 停 + Sosumi 系统通知
+    ▸ Stage 2 死磕:连败 6 次 → 停 + Sosumi 系统通知
+    ▸ Cooldown:连败 3 次起 sleep 等罐头缓气
+
+  十一、报表
+    ▸ 运行报告/YYYYMMDD/运行日志.txt
+    ▸ 失败记录.xlsx
+    ▸ 高阅读量提醒.txt
+    ▸ 汇总报告.txt(收尾)
+
+============================================================
+v1101.1 — 待发布
+============================================================
+
+【修了哪些 bug】(101.1 出版时填这里)
+
+  - (空)
+
+============================================================
+
+【相关文档】
+  - 仓库 spec:shared_memory/project_v1101_spec.md
   - 修复分工章程:shared_memory/project_claude_分工章程.md
-  - 待修清单:shared_memory/(本机 memory)
