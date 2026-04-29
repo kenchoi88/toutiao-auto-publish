@@ -121,17 +121,32 @@ v1101.2 — 2026-04-29 凌晨(末位账号 CDP 注入彻底修复)
   - 搜索框 fallback 不再依赖罐头前台,后台可发
   - 取消对 osascript keystroke 的依赖,跟 VSCode / 输入法 / 其它前台应用解耦
 
-【落地状态(2026-04-29)】
-  ✓ neo  — 小齐落
-  ✓ air  — 阿良落
-  ✓ win  — 绣虎之前已落桌面真版(本版 win/ = 桌面 cp)
-  ☐ mini — 东山待落
-  ☐ neo2 — 左右待落
+  Bug 2 — P2 (find_or_reopen_webview) L2 兜底漏抄到 mac 阵营 [2026-04-29 10:50 补]
+    现象:Bug 1 修了 "账号坐标找不到" 一支(P1),但 "账号坐标找到 / webview ws_url 拿不到" 一支(P2)
+         在 mac 阵营从未补上。win 桌面 04-27 早就有 P2,从未扩散。
+    路径区分:
+      P1 = scroll_find_account 内 CDP 注入(账号定位失败救账号坐标)
+      P2 = find_or_reopen_webview 关 tab 重建 partition(找到坐标但 webview ws_url 不出)
+    暴露:mini 文章定时 04-29 时光浅巷 Stage 2 共 9 个小轮 "X 找不到 webview" 退本轮,
+         3 篇文档缺哥手工切 tab 救场。
+    修法:从 win 桌面 gtg_batch.py:972-1071 移植 P2 三函数到 mac 三件套
+         (_search_box_set / _locate_filtered_account / find_or_reopen_webview)
+         业务调用 ws_url = find_account_webview(main_ws, name)
+                → ws_url = find_or_reopen_webview(main_ws, name)
+         P2 内部仍调 find_account_webview(非递归)
+
+【落地状态(2026-04-29 10:50 更新)】
+  ✓ win  — 绣虎之前已落桌面真版(本版 win/ = 桌面 cp,P1+P2 全)
+  ✓ mini — 绣虎 10:49 SSH patch 三大件 P2 (bak_pre_p2_20260429_104840)
+  ✓ 仓库 v1101.2/mac/ — 从 mini patched 版本 scp 回落
+  ◐ neo  — 小齐凌晨已落 P1,P2 待补(从仓库 v1101.2/mac/ cp 桌面真版)
+  ◐ air  — 阿良凌晨已落 P1,P2 待补(同上)
+  ☐ neo2 — 左右待落 (P1+P2 一并)
 
 【说明】
-  - 本版 win/ 已 cp 桌面真版三大件,含 CDP 注入 + 关 tab 重建 partition L2 兜底
-  - 本版 mac/ 仅 README 占位,待 air + neo 推桌面真版到 air/, neo/ 分目录后,
-    绣虎以小齐 neo 版本为 mac source 合 v1101.2/mac/
+  - 本版 win/ 已 cp 桌面真版三大件,含 P1 (CDP 注入) + P2 (关 tab 重建 partition L2 兜底)
+  - 本版 mac/ 现含 P1+P2 完整版 (10:50 后),neo / air / neo2 应从此目录抄桌面真版
+  - P2 漏抄缘由 + 检讨备案见 故障日志.txt (2026-04-29 10:50 条)
 
 ============================================================
 v1101.1 — 2026-04-28 下午(熔断重构)

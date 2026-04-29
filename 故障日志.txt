@@ -34,6 +34,68 @@
 已修
 ============================================================
 
+--- [2026-04-29 10:50] [mini 三大件 + 全 mac 阵营] [v1101.2 P2 漏抄] ---
+现象: v1101.2 凌晨上线后看似已修,实际只移植了 P1 (scroll_find_account 内 CDP 注入),
+      没移植 P2 (find_or_reopen_webview 关 tab 重建 partition L2 兜底)。
+      仓库 v1101.2/mac/ + neo 桌面 + air 桌面 + mini 桌面 全 mac 阵营三件套都缺 P2 函数。
+影响: mini 文章定时 04-29 时光浅巷 Stage 2 共 9 个小轮 "X 找不到 webview" 直接退本轮,
+      3 篇文档全靠缺哥 10:27 手工切 tab 救场。air/neo 同样裸奔,只是今天没被这条路径命中。
+上下文: P2 三函数 (_search_box_set / _locate_filtered_account / find_or_reopen_webview)
+       是 win 桌面 gtg_batch.py 04-27 的修法,从未扩散到 mac 阵营。
+       v1101.2 故障日志条目只列 P1 的 CDP 注入片段,P2 在 win/README.md "含 CDP 注入 + 关 tab
+       重建 partition L2 兜底" 一笔带过,没在故障日志展开。
+       东山照故障日志 + README 抄 mini 桌面 → 只移植了 P1 (line 418-454),P2 = 0 命中。
+推测根因: 绣虎(我)写 v1101.2 修法时把 P1 当作全部修法,P2 在 README 顺嘴提没进故障日志权威源。
+谁记的: 绣虎(本人检讨备案)
+状态: 已修(mini 桌面 + 仓库 mac/)
+
+★ 故障路径区分:
+  P1 路径 — 账号坐标找不到 (scroll_find_account 内滚动失败)
+           → CDP 注入搜索框过滤定位 (108,459) → 救活 (air 海屿星辰场景)
+  P2 路径 — 账号坐标找到但 webview ws_url 拿不到 (find_account_webview 重试 3/3 全失败)
+           → 关 tab → 搜索框注入账号名 → 等过滤 → 抓坐标 → click → 再取 ws_url → 救活
+           (mini 时光浅巷场景)
+  v1101.2 凌晨修法 = 只 P1。今天 mini 走 P2,无救。
+
+★ 修法:
+  从 win 桌面 gtg_batch.py:972-1071 移植 P2 三函数到 mac 三件套(并 commit 仓库 v1101.2/mac/):
+    _search_box_set(main_ws, value)              侧边栏搜索框设值/清空 (React-friendly)
+    _locate_filtered_account(main_ws, name)      抓过滤后第一个匹配账号坐标
+    find_or_reopen_webview(main_ws, name, 2)     关 tab + 搜索框重建 partition,失败 2 次降级返回 None
+  业务调用替换 (3 文件共 4 处):
+    ws_url = find_account_webview(main_ws, name)
+      → ws_url = find_or_reopen_webview(main_ws, name)
+  P2 内部 2 处 ws_url = find_account_webview 保留 (非递归)
+
+★ 落地状态(2026-04-29 10:50):
+  ✓ mini  — 绣虎 SSH patch 三大件,bak_pre_p2_20260429_104840
+            微头条 gtg_batch.py 2431 行 / 文章 2352 行 / 文章定时 gtg_timer.py 2355 行
+  ✓ 仓库 v1101.2/mac/  — 从 mini patched 版本 scp 回落
+  ☐ air  — 阿良待落 (从仓库 v1101.2/mac/ cp 桌面真版即可)
+  ☐ neo  — 小齐待落 (同上)
+  ☐ neo2 — 左右待落 (跟主线落 v1101.2 时一并补)
+落地人: 绣虎 (Win 台机 SSH kenchoimini@100.70.22.7 操作 mini)
+
+★ 检讨备案 (绣虎):
+  错在三处:
+    1. 故障日志.txt 写 v1101.2 修法时只列 P1 的 CDP 注入代码片段,
+       P2 (find_or_reopen_webview) 完全没写 → 修法权威源不全。
+       东山照故障日志抄,自然漏 P2。
+    2. 04-29 04:16 我落进 仓库 v1101.2/mac/ 的版本本身就缺 P2,
+       而且没 commit (留 untracked) → 既漏抄又漏入库。
+    3. 写完 "已修(v1101.2)" 没自我对账:
+       "P2 是不是也在 mac/ 里? air/neo 拿到的版本完整吗?"
+       — 没做分工章程里我自己写的 "守" 字。
+  代价: mini 时光浅巷 9 个小轮卡死,缺哥 10:27 手工救场 3 篇,
+       凌晨 9:33 -- 10:30 之间发文流程被打断;
+       且过去半小时缺哥已经直接给出诊断 "mini 三大件,没有最后一个账号搜索框",
+       我还反复让缺哥重复 / 指错 / 点出 "是 MINI"。
+  教训:
+    - 修法权威源 = 故障日志.txt (不是 README,不是各机口耳相传)。
+      写 "已修" 前必须 grep 仓库 + 各机桌面 mac/ 路径里所有相关函数都齐。
+    - 缺哥第一句话往往就是答案。再问让重复 = 浪费时间。
+    - 落到仓库的文件必须立即 commit。untracked = 没落地。
+
 --- [2026-04-29] [air + neo 同日复发 → 全队 CDP 注入修法] [三大件] ---
 现象: 虚拟滚动底部账号搜索框定位失效,死磕失败
 影响: air + neo 同日同时复发;Air 海屿星辰末位账号 5+ 大循环死磕,5 篇文档堵死
