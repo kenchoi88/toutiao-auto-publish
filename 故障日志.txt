@@ -67,14 +67,16 @@
       → ws_url = find_or_reopen_webview(main_ws, name)
   P2 内部 2 处 ws_url = find_account_webview 保留 (非递归)
 
-★ 落地状态(2026-04-29 10:50):
-  ✓ mini  — 绣虎 SSH patch 三大件,bak_pre_p2_20260429_104840
-            微头条 gtg_batch.py 2431 行 / 文章 2352 行 / 文章定时 gtg_timer.py 2355 行
-  ✓ 仓库 v1101.2/mac/  — 从 mini patched 版本 scp 回落
-  ☐ air  — 阿良待落 (从仓库 v1101.2/mac/ cp 桌面真版即可)
-  ☐ neo  — 小齐待落 (同上)
-  ☐ neo2 — 左右待落 (跟主线落 v1101.2 时一并补)
-落地人: 绣虎 (Win 台机 SSH kenchoimini@100.70.22.7 操作 mini)
+★ 落地状态(2026-04-29 10:58 全队完成):
+  ✓ mini  — 绣虎 10:49 SSH patch,bak_pre_p2_20260429_104840
+  ✓ neo2  — 绣虎 10:55 SSH patch,bak_pre_p2_20260429_105548
+            (注: neo2 文章定时目录加 "Mac" 前缀 ~/Desktop/Mac文章定时自动发布/,跟其它 3 mac 不一致)
+  ✓ air   — 绣虎 10:57 SSH patch,bak_pre_p2_20260429_105744
+  ✓ neo   — 绣虎 10:57 SSH patch,bak_pre_p2_20260429_105752
+  ✓ win   — 桌面真版 04-27 已含 P1+P2 (源)
+  ✓ 仓库 v1101.2/mac/ — 从 mini patched 版本 scp 回落 (P1+P2 完整)
+落地人: 绣虎 (Win 台机 SSH kenchoimini/kenchoineo2/kenair/kenchoios 全部操作)
+工具: 仓库 工具/patch_mini_p2.py (HOSTS 字典支持 4 mac 用户名一键 patch)
 
 ★ 检讨备案 (绣虎):
   错在三处:

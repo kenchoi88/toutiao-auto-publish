@@ -135,13 +135,13 @@ v1101.2 — 2026-04-29 凌晨(末位账号 CDP 注入彻底修复)
                 → ws_url = find_or_reopen_webview(main_ws, name)
          P2 内部仍调 find_account_webview(非递归)
 
-【落地状态(2026-04-29 10:50 更新)】
-  ✓ win  — 绣虎之前已落桌面真版(本版 win/ = 桌面 cp,P1+P2 全)
-  ✓ mini — 绣虎 10:49 SSH patch 三大件 P2 (bak_pre_p2_20260429_104840)
-  ✓ 仓库 v1101.2/mac/ — 从 mini patched 版本 scp 回落
-  ◐ neo  — 小齐凌晨已落 P1,P2 待补(从仓库 v1101.2/mac/ cp 桌面真版)
-  ◐ air  — 阿良凌晨已落 P1,P2 待补(同上)
-  ☐ neo2 — 左右待落 (P1+P2 一并)
+【落地状态(2026-04-29 10:58 全队完成)】
+  ✓ win  — 桌面真版 04-27 已含 P1+P2 (源)
+  ✓ mini — 绣虎 10:49 SSH patch P2 (bak_pre_p2_20260429_104840)
+  ✓ neo2 — 绣虎 10:55 SSH patch P1+P2 (bak_pre_p2_20260429_105548)
+  ✓ air  — 绣虎 10:57 SSH patch P2 (bak_pre_p2_20260429_105744)
+  ✓ neo  — 绣虎 10:57 SSH patch P2 (bak_pre_p2_20260429_105752)
+  ✓ 仓库 v1101.2/mac/ — 从 mini patched 版本 scp 回落 (P1+P2 完整)
 
 【说明】
   - 本版 win/ 已 cp 桌面真版三大件,含 P1 (CDP 注入) + P2 (关 tab 重建 partition L2 兜底)

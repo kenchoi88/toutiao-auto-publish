@@ -182,10 +182,33 @@ def patch_one(path):
 
 
 if __name__ == '__main__':
-    targets = [
-        '/Users/kenchoimini/Desktop/微头条自动发布/gtg_batch.py',
-        '/Users/kenchoimini/Desktop/文章自动发布/gtg_batch.py',
-        '/Users/kenchoimini/Desktop/文章定时自动发布/gtg_timer.py',
-    ]
+    import getpass
+    user = getpass.getuser()
+    HOSTS = {
+        'kenchoimini': [
+            '/Users/kenchoimini/Desktop/微头条自动发布/gtg_batch.py',
+            '/Users/kenchoimini/Desktop/文章自动发布/gtg_batch.py',
+            '/Users/kenchoimini/Desktop/文章定时自动发布/gtg_timer.py',
+        ],
+        'kenchoineo2': [
+            '/Users/kenchoineo2/Desktop/微头条自动发布/gtg_batch.py',
+            '/Users/kenchoineo2/Desktop/文章自动发布/gtg_batch.py',
+            '/Users/kenchoineo2/Desktop/Mac文章定时自动发布/gtg_timer.py',
+        ],
+        'kenair': [
+            '/Users/kenair/Desktop/微头条自动发布/gtg_batch.py',
+            '/Users/kenair/Desktop/文章自动发布/gtg_batch.py',
+            '/Users/kenair/Desktop/文章定时自动发布/gtg_timer.py',
+        ],
+        'kenchoios': [
+            '/Users/kenchoios/Desktop/微头条自动发布/gtg_batch.py',
+            '/Users/kenchoios/Desktop/文章自动发布/gtg_batch.py',
+            '/Users/kenchoios/Desktop/文章定时自动发布/gtg_timer.py',
+        ],
+    }
+    targets = HOSTS.get(user)
+    if not targets:
+        print(f"unknown host user={user}; supported: {list(HOSTS)}")
+        sys.exit(1)
     ok = sum(1 for t in targets if patch_one(t))
     print(f"\n=== 落地 {ok}/{len(targets)} ===")
