@@ -1369,40 +1369,119 @@ end tell
         return False, "信用分过低"
     should_first = (account_name not in NOFIRST_ACCOUNTS) and (credit_score is not None and credit_score >= 95)
 
-    first_result = js(wsc, f"""
-    (function(){{
-        var shouldCheck = {'true' if should_first else 'false'};
+    # [v1101.3] 头条首发复选框: 探测 + cliclick 点击 + 回读校验 + 三轮兜底 + 硬保护
+    _PROBE_JS = r"""
+    (function(){
         var all = document.querySelectorAll('*');
-        for(var i=0;i<all.length;i++){{
-            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '\u5934\u6761\u9996\u53d1'){{
+        for(var i=0;i<all.length;i++){
+            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '头条首发'){
                 var p = all[i].parentElement;
-                while(p && p.tagName !== 'BODY'){{
-                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){{
+                while(p && p.tagName !== 'BODY'){
+                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){
                         var isChecked = p.classList.contains('byte-checkbox-checked');
-                        if(isChecked === shouldCheck) return JSON.stringify({{already: true, checked: isChecked}});
                         var r = p.getBoundingClientRect();
-                        if(r.width > 0 && r.height > 0)
-                            return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
-                        break;
-                    }}
+                        var px = Math.round(r.left + r.width/2);
+                        var py = Math.round(r.top + r.height/2);
+                        return JSON.stringify({found:true, checked:isChecked, cb_x:px, cb_y:py});
+                    }
                     p = p.parentElement;
-                }}
-            }}
-        }}
+                }
+            }
+        }
         return null;
-    }})()
-    """, 79)
-    if first_result:
-        fr = json.loads(first_result)
-        if "already" in fr:
-            log(f"  头条首发: 已是{'勾选' if fr['checked'] else '未勾选'}，无需操作")
-        elif "x" in fr:
-            wv_r = get_wv()
-            subprocess.run(["cliclick", f"c:{wv_r['sx']+fr['x']},{wv_r['sy']+fr['y']}"], capture_output=True)
-            time.sleep(0.3)
-            log(f"  头条首发: {'勾选' if should_first else '取消勾选'}")
-    else:
+    })()
+    """
+    _CLICK_JS = r"""
+    (function(){
+        var all = document.querySelectorAll('*');
+        for(var i=0;i<all.length;i++){
+            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '头条首发'){
+                var p = all[i].parentElement;
+                while(p && p.tagName !== 'BODY'){
+                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){
+                        try{ p.click(); }catch(e){}
+                        var inp = p.querySelector('input[type="checkbox"]');
+                        if(inp){
+                            try{ inp.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+                        }
+                        return 'label';
+                    }
+                    p = p.parentElement;
+                }
+            }
+        }
+        return null;
+    })()
+    """
+    _WV_JS = r"""
+    (function(){
+        var wvs = document.querySelectorAll('webview');
+        var maxArea = 0, best = null;
+        for(var i=0;i<wvs.length;i++){
+            var r = wvs[i].getBoundingClientRect();
+            var area = r.width * r.height;
+            if(area > maxArea){ maxArea = area; best = r; }
+        }
+        if(!best) return null;
+        return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
+    })()
+    """
+
+    def _probe_first():
+        raw = js(wsc, _PROBE_JS, 79)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def _wv_origin():
+        raw = js(main_ws, _WV_JS, 80)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    fr = _probe_first()
+    if fr is None:
         log("  头条首发: 未找到复选框")
+    elif bool(fr.get('checked')) == should_first:
+        log(f"  头条首发: 已是{'勾选' if fr['checked'] else '未勾选'}，无需操作")
+    else:
+        attempts = []
+        verified = False
+        for attempt in range(1, 4):
+            if attempt < 3 and fr.get('found'):
+                wv = _wv_origin()
+                if wv:
+                    sx = wv['sx'] + fr['cb_x']
+                    sy = wv['sy'] + fr['cb_y']
+                    subprocess.run(["cliclick", f"c:{sx},{sy}"], capture_output=True)
+                    attempts.append(f"cliclick#{attempt}@({sx},{sy})")
+                    time.sleep(0.4)
+                else:
+                    attempts.append(f"cliclick#{attempt}=no_wv")
+                    time.sleep(0.2)
+            else:
+                rc = js(wsc, _CLICK_JS, 30)
+                time.sleep(0.4)
+                attempts.append(f"js#{attempt}={rc}")
+            fr2 = _probe_first()
+            if fr2 and bool(fr2.get('checked')) == should_first:
+                log(f"  头条首发: {'勾选' if should_first else '取消勾选'} 已校验 [{'/'.join(attempts)}]")
+                verified = True
+                break
+            fr = fr2 if fr2 else fr
+        if not verified:
+            actual = fr.get('checked') if fr else None
+            log(f"  ✗ 头条首发校准失败: 目标={should_first} 实际={actual} 尝试=[{'/'.join(attempts)}]")
+            if (not should_first) and actual is True:
+                log(f"  ★ 硬保护: 应取消首发但仍勾选,跳过该篇避免扣 5 分")
+                wsc.close()
+                return False, "首发取消失败(硬保护)"
 
     # ---- 立即/定时分支 fork ----
     if timer_time is None:

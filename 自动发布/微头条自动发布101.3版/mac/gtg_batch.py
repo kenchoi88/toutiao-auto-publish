@@ -1,4 +1,7 @@
 """
+[v1101.3] 2026-04-29 微头条 文档导入按钮 hotfix
+  A: 锁 .weitoutiao-import-plugin class 避免 textContent 命中错误候选
+  B: 先 CDP click() 优先,失败再 cliclick 兜底
 [v1101] 2026-04-28 缺哥拍 — 大统一基线
 v1101 改动:Step 3 6s 删 + ProseMirror 取最长 + 字数<50 重试 fill_dialog 1 次
 
@@ -757,12 +760,16 @@ def scroll_find_account(main_ws, name):
                 for(var i=0;i<items.length;i++){{
                     var t = items[i].textContent.trim();
                     if(t === {name_json} || t.startsWith({name_json})){{
-                        var r = items[i].getBoundingClientRect();
+                        // patch_lastacc: items[i] 是外层 account row (cliclick 不响应),
+                        // 真可点击 row 是其子树中的 horizontalAccount-* (x≈83 中心).
+                        var hor = items[i].querySelector('[class*="horizontalAccount"]');
+                        var row = (hor && hor.getBoundingClientRect().width>=60) ? hor : items[i];
+                        var r = row.getBoundingClientRect();
                         if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
                             return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
-                        // 坐标不在视口内，再滚一次
-                        items[i].scrollIntoView({{block:'center', behavior:'instant'}});
-                        r = items[i].getBoundingClientRect();
+                        // 坐标不在视口内，再滚一次 (基于 row)
+                        row.scrollIntoView({{block:'center', behavior:'instant'}});
+                        r = row.getBoundingClientRect();
                         if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
                             return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
                     }}
@@ -793,33 +800,24 @@ def scroll_find_account(main_ws, name):
             else:
                 same_count = 0
 
-    # 滚动找不到，尝试搜索框输入账号名过滤
-    log(f"  滚动未找到账号，尝试搜索框输入: {name}")
-    search_pos = js(main_ws, """
-    (function(){
-        var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
-        if(!s) return null;
-        var r = s.getBoundingClientRect();
-        if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
-        return null;
-    })()
-    """, 14)
-    if not search_pos:
-        return None
-    # v1101.2: CDP nativeInputValueSetter 注入,绕过键盘+罐头前台依赖(实战 air 295→300)
-    js(main_ws, f"""
+    # 滚动找不到,CDP JS 注入搜索框过滤(neo 同款 — 不需罐头前台,VSCode 占着不影响)
+    # 直接调 React/Vue controlled input 内部 setter + dispatch input/change,绕开物理键盘
+    log(f"  滚动未找到账号,CDP 注入搜索框过滤: {name}")
+    filled = js(main_ws, f"""
     (function(){{
         var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
         if(!s) return 'no_input';
         var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         setter.call(s, {name_json});
-        s.dispatchEvent(new Event('input',  {{bubbles:true}}));
+        s.dispatchEvent(new Event('input', {{bubbles:true}}));
         s.dispatchEvent(new Event('change', {{bubbles:true}}));
         return 'ok';
     }})()
-    """, 15)
+    """, 14)
+    if filled != 'ok':
+        return None
     time.sleep(1.5)
-    # 再取坐标
+    # 取过滤后的目标账号坐标
     pos = js(main_ws, f"""
     (function(){{
         var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
@@ -837,15 +835,16 @@ def scroll_find_account(main_ws, name):
     """, 18)
     if pos:
         log(f"  搜索框过滤后找到账号: {name}")
-        # v1101.2: CDP 清空搜索框,恢复完整列表
+        # CDP 注入清空搜索框,恢复完整列表
         js(main_ws, """
         (function(){
             var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
-            if(!s) return;
+            if(!s) return 'no_input';
             var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
             setter.call(s, '');
-            s.dispatchEvent(new Event('input',  {bubbles:true}));
+            s.dispatchEvent(new Event('input', {bubbles:true}));
             s.dispatchEvent(new Event('change', {bubbles:true}));
+            return 'ok';
         })()
         """, 19)
         time.sleep(0.5)
@@ -1340,12 +1339,17 @@ def publish_article(ws_url, doc_path, main_ws, account_name="", _credit_out=None
     for _ in range(20):
         v = js(wsc, """
         (function(){
+            var btn = document.querySelector('.weitoutiao-import-plugin');
+            if(btn){
+                var r = btn.getBoundingClientRect();
+                if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2), via:'class'});
+            }
             var els = document.querySelectorAll('*');
             for(var i=0;i<els.length;i++){
                 var t = els[i].textContent.trim();
                 if(t === '\u6587\u6863\u5bfc\u5165' && els[i].children.length <= 2){
-                    var r = els[i].getBoundingClientRect();
-                    if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
+                    var r2 = els[i].getBoundingClientRect();
+                    if(r2.width > 0) return JSON.stringify({x:Math.round(r2.left+r2.width/2), y:Math.round(r2.top+r2.height/2), via:'text'});
                 }
             }
             return null;
@@ -1383,7 +1387,7 @@ def publish_article(ws_url, doc_path, main_ws, account_name="", _credit_out=None
     wv0 = json.loads(wv_s)
     import_x = wv0['sx'] + p['x']
     import_y = wv0['sy'] + p['y']
-    log(f"  文档导入按钮真实屏幕坐标: ({import_x},{import_y})")
+    log(f"  文档导入按钮真实屏幕坐标: ({import_x},{import_y}) via={p.get('via','?')}")
 
     import subprocess, threading
     # [v1101 P5] 强化 activate:unhide + AXRaise + verify frontmost + 重试 3 次
@@ -1447,14 +1451,48 @@ end tell
             break
         time.sleep(0.5)
     log("  准备点击文档导入")
-    # 先点编辑区空白处让 webview 获得焦点
-    editor_x = wv0b['sx'] + 400 if wv_s2 else wv0['sx'] + 400
-    editor_y = wv0b['sy'] + 200 if wv_s2 else wv0['sy'] + 200
-    subprocess.run(["cliclick", f"c:{editor_x},{editor_y}"], capture_output=True)
-    time.sleep(0.5)
-    # [v1101 P7] cliclick 文档导入 + 等弹窗,失败重试 3 次(每次重 activate + 重读坐标)
+
+    # [v1101.3 B] 先 CDP click(),命中即跳过 cliclick;失败 fallback cliclick
     sel = None
+    cdp_clicked = js(wsc, """
+    (function(){
+        var btn = document.querySelector('.weitoutiao-import-plugin');
+        if(btn){ btn.click(); return true; }
+        return false;
+    })()
+    """, 63)
+    if cdp_clicked:
+        log("  CDP click() 已派发,等弹窗")
+        for _ in range(8):
+            sel = js(wsc, """
+            (function(){
+                var btns = document.querySelectorAll('button');
+                for(var i=0;i<btns.length;i++){
+                    if(btns[i].textContent.trim() === '选择文档'){
+                        var r = btns[i].getBoundingClientRect();
+                        if(r.width > 0) return JSON.stringify({bx: Math.round(r.left+r.width/2), by: Math.round(r.top+r.height/2)});
+                    }
+                }
+                return null;
+            })()
+            """, 64)
+            if sel:
+                log("  OK CDP click 唤出弹窗")
+                break
+            time.sleep(0.5)
+        if not sel:
+            log("  CDP click 未唤出 → cliclick 兜底")
+
+    if not sel:
+        # 先点编辑区空白处让 webview 获得焦点
+        editor_x = wv0b['sx'] + 400 if wv_s2 else wv0['sx'] + 400
+        editor_y = wv0b['sy'] + 200 if wv_s2 else wv0['sy'] + 200
+        subprocess.run(["cliclick", f"c:{editor_x},{editor_y}"], capture_output=True)
+        time.sleep(0.5)
+    # [v1101 P7] cliclick 文档导入 + 等弹窗,失败重试 3 次(每次重 activate + 重读坐标)
     for click_attempt in range(3):
+        if sel:
+            break
         attempt_str = f" [第{click_attempt+1}次]" if click_attempt > 0 else ""
         log(f"  cliclick 点击文档导入 ({import_x},{import_y}){attempt_str}")
         subprocess.run(["cliclick", f"c:{import_x},{import_y}"], capture_output=True)
@@ -1535,7 +1573,7 @@ end tell
 
     if not sel:
         wsc.close()
-        return False, "文档导入弹窗未出现(3 次 cliclick 重试均失败)"
+        return False, "文档导入弹窗未出现(CDP+cliclick 均失败)"
 
     # 从主窗口取 webview 真实屏幕坐标
     wv_screen = js(main_ws, """
@@ -1852,65 +1890,119 @@ end tell
         _credit_out.append(credit_score)
     should_first = (account_name not in NOFIRST_ACCOUNTS) and (credit_score is not None and credit_score >= 95)
 
-    # 根据信用分设置头条首发复选框
-    first_result = js(wsc, f"""
-    (function(){{
-        var shouldCheck = {'true' if should_first else 'false'};
+    # [v1101.3] 头条首发复选框: 探测 + cliclick 点击 + 回读校验 + 三轮兜底 + 硬保护
+    _PROBE_JS = r"""
+    (function(){
         var all = document.querySelectorAll('*');
-        for(var i=0;i<all.length;i++){{
-            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '\u5934\u6761\u9996\u53d1'){{
-                // 向上找 LABEL.byte-checkbox，用 byte-checkbox-checked 判断勾选状态
+        for(var i=0;i<all.length;i++){
+            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '头条首发'){
                 var p = all[i].parentElement;
-                while(p && p.tagName !== 'BODY'){{
-                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){{
+                while(p && p.tagName !== 'BODY'){
+                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){
                         var isChecked = p.classList.contains('byte-checkbox-checked');
-                        if(isChecked === shouldCheck){{
-                            return JSON.stringify({{already: true, checked: isChecked}});
-                        }}
                         var r = p.getBoundingClientRect();
-                        if(r.width > 0 && r.height > 0){{
-                            return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
-                        }}
-                        break;
-                    }}
+                        var px = Math.round(r.left + r.width/2);
+                        var py = Math.round(r.top + r.height/2);
+                        return JSON.stringify({found:true, checked:isChecked, cb_x:px, cb_y:py});
+                    }
                     p = p.parentElement;
-                }}
-            }}
-        }}
-        return null;
-    }})()
-    """, 79)
-    if first_result:
-        fr = json.loads(first_result)
-        if "already" in fr:
-            log(f"  头条首发: 已是{'勾选' if fr['checked'] else '未勾选'}，无需操作")
-        elif "x" in fr:
-            # cliclick真实点击（CDP虚拟事件对自定义复选框无效）
-            wv_r = js(main_ws, """
-            (function(){
-                var wvs = document.querySelectorAll('webview');
-                var maxArea = 0, best = null;
-                for(var i=0;i<wvs.length;i++){
-                    var r = wvs[i].getBoundingClientRect();
-                    var area = r.width * r.height;
-                    if(area > maxArea){ maxArea = area; best = r; }
                 }
-                if(!best) return null;
-                return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
-            })()
-            """, 80)
-            wv = json.loads(wv_r) if wv_r else None
-            if wv:
-                sx = wv['sx'] + fr['x']
-                sy = wv['sy'] + fr['y']
-                subprocess.run(["cliclick", f"c:{sx},{sy}"], capture_output=True)
-                log(f"  头条首发 cliclick ({sx},{sy})")
-            else:
-                log("  头条首发: webview坐标获取失败，跳过点击")
-            time.sleep(0.3)
-            log(f"  头条首发: {'勾选' if should_first else '取消勾选'}")
-    else:
+            }
+        }
+        return null;
+    })()
+    """
+    _CLICK_JS = r"""
+    (function(){
+        var all = document.querySelectorAll('*');
+        for(var i=0;i<all.length;i++){
+            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '头条首发'){
+                var p = all[i].parentElement;
+                while(p && p.tagName !== 'BODY'){
+                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){
+                        try{ p.click(); }catch(e){}
+                        var inp = p.querySelector('input[type="checkbox"]');
+                        if(inp){
+                            try{ inp.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+                        }
+                        return 'label';
+                    }
+                    p = p.parentElement;
+                }
+            }
+        }
+        return null;
+    })()
+    """
+    _WV_JS = r"""
+    (function(){
+        var wvs = document.querySelectorAll('webview');
+        var maxArea = 0, best = null;
+        for(var i=0;i<wvs.length;i++){
+            var r = wvs[i].getBoundingClientRect();
+            var area = r.width * r.height;
+            if(area > maxArea){ maxArea = area; best = r; }
+        }
+        if(!best) return null;
+        return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
+    })()
+    """
+
+    def _probe_first():
+        raw = js(wsc, _PROBE_JS, 79)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def _wv_origin():
+        raw = js(main_ws, _WV_JS, 80)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    fr = _probe_first()
+    if fr is None:
         log("  头条首发: 未找到复选框")
+    elif bool(fr.get('checked')) == should_first:
+        log(f"  头条首发: 已是{'勾选' if fr['checked'] else '未勾选'}，无需操作")
+    else:
+        attempts = []
+        verified = False
+        for attempt in range(1, 4):
+            if attempt < 3 and fr.get('found'):
+                wv = _wv_origin()
+                if wv:
+                    sx = wv['sx'] + fr['cb_x']
+                    sy = wv['sy'] + fr['cb_y']
+                    subprocess.run(["cliclick", f"c:{sx},{sy}"], capture_output=True)
+                    attempts.append(f"cliclick#{attempt}@({sx},{sy})")
+                    time.sleep(0.4)
+                else:
+                    attempts.append(f"cliclick#{attempt}=no_wv")
+                    time.sleep(0.2)
+            else:
+                rc = js(wsc, _CLICK_JS, 30)
+                time.sleep(0.4)
+                attempts.append(f"js#{attempt}={rc}")
+            fr2 = _probe_first()
+            if fr2 and bool(fr2.get('checked')) == should_first:
+                log(f"  头条首发: {'勾选' if should_first else '取消勾选'} 已校验 [{'/'.join(attempts)}]")
+                verified = True
+                break
+            fr = fr2 if fr2 else fr
+        if not verified:
+            actual = fr.get('checked') if fr else None
+            log(f"  ✗ 头条首发校准失败: 目标={should_first} 实际={actual} 尝试=[{'/'.join(attempts)}]")
+            if (not should_first) and actual is True:
+                log(f"  ★ 硬保护: 应取消首发但仍勾选,跳过该篇避免扣 5 分")
+                wsc.close()
+                return False, "首发取消失败(硬保护)"
 
     # 点"发布"
     v = js(wsc, """
