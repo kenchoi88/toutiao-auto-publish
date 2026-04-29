@@ -235,6 +235,32 @@ v1101.3 — 2026-04-29(头条首发"取消勾选"假动作 hotfix)
     需在头条创作者后台手工退出"首发激励计划"才能彻底关掉首发审核。
 
 ============================================================
+v1101.3 hotfix#2 — 2026-04-29 21:45 (Mac 端 Finder 兜底抢前台守护)
+============================================================
+
+【修的现象】
+  Mac 跑发文时,篇间等待 8~17 秒期间罐头失去 frontmost,
+  macOS 默认把 frontmost 给 Finder → 桌面壁纸冒出来,看上去窗口"消失",
+  下篇开始 ensure_gtg_top 才把罐头拉回来。视觉抖动,不影响发文成功率。
+
+【修法】
+  工具/keep_canned_top.sh —— 后台 0.5s 轮询 frontmost,
+  只在 frontmost=Finder 时 activate 创作罐头。其他 frontmost 不动,
+  对脚本本身无干扰(脚本 cliclick 时罐头本就 frontmost,守护不介入)。
+
+【部署】
+  scp 工具/keep_canned_top.sh kenairXXX@<machine>:/tmp/ &&
+  ssh kenairXXX@<machine> 'nohup bash /tmp/keep_canned_top.sh > /tmp/keep_canned_top.log 2>&1 &'
+
+  停:ssh ... 'pkill -f keep_canned_top'
+
+【落地】
+  ✓ mini — 绣虎远程部署
+  ☐ air / neo / neo2 — 各 Mac Claude 自取部署
+
+  Mac 端通用,Win 不需要(win32api 不抢前台)。
+
+============================================================
 
 【相关文档】
   - 仓库 spec:shared_memory/project_v1101_spec.md

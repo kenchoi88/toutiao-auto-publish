@@ -28,6 +28,30 @@
 未修
 ============================================================
 
+--- [2026-04-29 21:45] [全 Mac 微头条/文章] [Finder 兜底抢前台 — 视觉抖动] ---
+现象: 脚本跑发文时,篇间等待 8~17 秒期间罐头失去 frontmost,
+      macOS 默认把 frontmost 给 Finder → 桌面壁纸冒出来,
+      看上去窗口"忽然消失";下篇开始 ensure_gtg_top 才把罐头拉回来。
+      视觉上反复"切到桌面再回罐头",但脚本本身仍能正确点击,发文成功率不受影响。
+影响: 不影响发文成功率,只是视觉抖动+干扰人眼监督。mini 最显眼,
+      其他 Mac 偶有出现。
+推测根因: mac 默认无 App 占 frontmost 时 Finder 兜底。脚本设计的
+      ensure_gtg_top 只在每篇开头调用,中间 sleep 期间不再激活,
+      于是 frontmost 漂走给 Finder。
+谁记的: 绣虎(Win 台机)
+状态: 修中(守护脚本方案) → v1101.3 hotfix#2
+
+★ 修法:
+  工具/keep_canned_top.sh — 0.5s 轮询 frontmost,只在 Finder 时
+  立即 activate 创作罐头。脚本 cliclick / 系统对话框 frontmost 不动,
+  无干扰。
+  使用:scp 到目标 Mac /tmp/ → nohup bash /tmp/keep_canned_top.sh & 即可。
+  停:pkill -f keep_canned_top。
+  落地版本: 工具脚本(独立),不嵌入 gtg_batch
+  落地状态:
+    ✓ mini — 绣虎远程部署(2026-04-29 21:42)
+    ☐ air / neo / neo2 — 各 Mac Claude 自取 工具/keep_canned_top.sh 部署
+
 --- [2026-04-29 21:30] [全机 微头条] [头条首发"取消勾选"假动作 — 连扣 9×5=45 信用分] ---
 现象: gtg_batch.py publish_article() 中 should_first=False 时执行的"取消勾选"
       实际是空点 — JS 返的是"头条首发"四个字 textNode 的 boundingClientRect 中心,
