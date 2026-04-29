@@ -28,6 +28,51 @@
 未修
 ============================================================
 
+--- [2026-04-30 01:00] [mini 文章定时] [gtg_timer.py 缺「本轮已发」中断恢复机制] ---
+现象: gtg_timer.py(v1101.3 / mac)启动时不读「本轮已发」sheet,
+      中断后重启会从任务 1 重新展开早+中+晚 450 任务,
+      已发过早窗的账号会被再次提交早窗定时,造成重发 / 配额错乱。
+      微头条 gtg_batch.py 有此机制(line 2356-2363 启动读 sheet 跳过 + line 274 整轮清空),
+      文章自动 / 文章定时 同源遗漏。
+影响: 04-30 凌晨 mini 文章定时跑到任务 9/450 (账号「小窝指南」)被中止;
+      已发 8 号(东风苹果甜甜/森寂/梦归何处/风乎舞雩/寻雪序/几抒词/成熟之辉/成熟之韵)
+      若直接重启会全部重发早窗 = 同账号同日早 8 点双发,
+      并占用 8 篇新素材使中/晚窗末尾任务素材不足。
+上下文: gtg_timer.py 主循环 line 2284 `for idx, (name, timer_time) in enumerate(tasks)`
+      只检查 dead_terminated,不检查任何"已发"集合;
+      task 是 (name, timer_time) 二元组,无 slot 标签。
+      「本轮已发」sheet 在 _EXCEL_SHEETS 里被声明,但 gtg_timer.py 全文 grep
+      "本轮已发" 命中 0,实际只有微头条 gtg_batch.py 用。
+推测根因: v1101 基线只在 gtg_batch.py 加了「本轮已发」机制,gtg_timer.py 漏同步。
+谁记的: 绣虎 (Win 台机)
+状态: 仅 mini 临时修(hotfix,未冠版本号),其他 Mac 暂不动等统一规划
+
+★ 修后补:
+修法: 在 mini 的 ~/Desktop/文章定时自动发布/gtg_timer.py 上打 hotfix 中断恢复:
+      1) 加 _slot_of(timer_time) — 按时间推断 早(<11)/中(<17)/晚
+      2) 加 _read_round_sent() — 读「本轮已发」sheet (A=账号名 B=时段),
+         返回 set((name, slot));B 空则视为该账号三时段全跳
+      3) 加 _append_round_sent(name, slot) — publish 成功后写一行
+      4) 加 _clear_round_sent() — 整轮跑完清空(保留表头)
+      5) main() 主循环 line 2284 前读 round_sent;
+         循环里 slot=_slot_of(timer_time);
+         if (name, slot) in round_sent: log + continue
+      6) success 分支(line 2335 后)调 _append_round_sent + round_sent.add
+      7) _finalize_config 前调 _clear_round_sent
+落地版本: 仅 mini 单机 hotfix(无版本号),air/neo2/neo 维持 v1101.3 原版不动
+落地时间: 2026-04-30 01:00
+落地人: 绣虎
+备份: ~/Desktop/文章定时自动发布/gtg_timer.py.bak_pre_resume_hotfix_<TS>
+sheet 状态: 启动时「本轮已发」预填 8 行(东风苹果甜甜/森寂/梦归何处/风乎舞雩/
+      寻雪序/几抒词/成熟之辉/成熟之韵 — 时段=早),
+      启动后 8 号早窗跳过,中/晚仍发,整轮跑完自清空
+后续: 这套机制等版本统一规划再合入 v1101.x mac 三件 + 仓库 mac/;
+      副作用观察期 = mini 当天文章定时整轮(450 任务) — 关注:
+      (a) 中/晚窗 8 号是否正常发出
+      (b) 整轮跑完「本轮已发」是否被清空
+      (c) 中途再中止重启时是否能精确续发
+      若观察期内任一项异常 → 回滚 .bak_pre_resume_hotfix_<TS> + 全表清空
+
 --- [2026-04-29 21:45] [全 Mac 微头条/文章] [Finder 兜底抢前台 — 视觉抖动] ---
 现象: 脚本跑发文时,篇间等待 8~17 秒期间罐头失去 frontmost,
       macOS 默认把 frontmost 给 Finder → 桌面壁纸冒出来,
