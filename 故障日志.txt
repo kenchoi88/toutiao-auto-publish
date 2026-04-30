@@ -28,6 +28,73 @@
 未修
 ============================================================
 
+--- [2026-04-30 10:40] [全 4 Mac] [frontmost App 追踪诊断装机 — 抓"窗口乱窜"真凶] ---
+现象/动机: keep_canned_top.sh 是为防"罐头丢前台被 Finder 兜底"设的事后补救(v1101.3 hotfix#2),
+      但 04-30 实测在 neo 矫枉过正抢用户切的窗口。缺哥要求**找正面解决**:
+      正常情况下不该有其他 App 来"抢罐头前台",这事的根因(谁来抢)还没诊断过。
+方案: 在 4 Mac 装一个**纯观察**脚本,每 0.5s 记 frontmost App 名字到 ~/frontmost_trace.log,
+      持续跑(不跟发文绑定,不改任何行为),累积一段时间后用
+      `awk '$3!="创作罐头"' ~/frontmost_trace.log | sort | uniq -c | sort -rn`
+      列出"哪些 App 抢过 + 抢了几次",定位真凶后定向干掉。
+脚本: ~/frontmost_trace.sh (源在仓库 工具/frontmost_trace.sh,装机日存 ~/)
+      ```
+      while true; do
+        ts=$(date '+%Y-%m-%d %H:%M:%S')
+        front=$(osascript -e '...frontmost is true' 2>/dev/null)
+        echo "$ts $front"
+        sleep 0.5
+      done
+      ```
+装机时间: 2026-04-30 10:40
+装机机器 + 实证 PID:
+  mini  PID 27942  起始 frontmost 创作罐头
+  neo2  PID 1042   起始 frontmost 创作罐头
+  neo   PID 79780  起始 frontmost Terminal(用户在 ssh)
+  air   PID 58995  起始 frontmost 创作罐头
+启动方式: nohup ~/frontmost_trace.sh > ~/frontmost_trace.log 2>&1 & disown
+停止方式: pkill -f frontmost_trace
+谁记的: 绣虎(Win 台机)
+状态: 装机完成,数据收集中(待积累 30+ 分钟后回查分析)
+后续:
+  - 累积 30 分钟+ 数据后跑统计:awk '$3!="创作罐头"' ~/frontmost_trace.log | sort | uniq -c | sort -rn
+  - 定位真凶后定向处置:关 App 通知 / 退出 App / 改启动项 / etc.
+  - 真凶定位 + 处置后,可考虑废 keep_canned_top.sh 守护(neo 已实证守护非必要 + 误伤大)
+  - 或改 keep_canned_top.sh 加白名单(Terminal/iTerm/VSCode/Claude 等 frontmost 时不动)+ 防抖
+
+--- [2026-04-30 11:00] [neo Mac] [keep_canned_top.sh 误抢前台,用户切窗被弹回罐头] ---
+现象: neo 发文期间用户切 Terminal / 其他 App 时,**立刻被弹回创作罐头窗口**,
+      无法切其他窗口看东西。neo2 / air 同期不抢(neo2 在跑发文 task 26+ 也不抢)。
+影响: neo 发文期间用户无法用机器看 log / 切窗口操作其他事情,体感被锁死。
+      本身不影响发文成功率,但严重影响用户监督 / 多任务。
+上下文(实证):
+  - neo 上跑 2 份 /tmp/keep_canned_top.sh 守护进程(PID 2824 + 77543)
+  - neo2 / mini / air 没跑这个守护(neo2 在跑发文也不抢前台 = 守护非必要)
+  - 守护脚本内容(v1101.3 hotfix#2)文字逻辑写得是
+      `if pgrep gtg_batch.py|gtg_timer.py + frontmost=Finder → activate 创作罐头`
+    理论上不会误抢 Terminal,但实测就是抢。
+  - 2 份并发 0.5s 轮询 → osascript 查 frontmost 在窗口切换瞬间可能返回 Finder
+    (罐头切换 / 弹窗打开瞬间 frontmost 短暂变 Finder)→ activate 罐头 → 抢回。
+推测根因:
+  ① 守护脚本启了 2 份(可能两次部署叠加),频次翻倍。
+  ② frontmost=Finder 探测时机踩到主脚本 cliclick 的窗口切换瞬间,误判触发 activate。
+  ③ 用户主动切到 Terminal,在 0.5s 内主脚本 cliclick / 罐头自身切换让 frontmost 短暂变 Finder
+     → 守护立即 activate 罐头 → 用户的 Terminal frontmost 被 1s 内打掉。
+谁记的: 绣虎(Win 台机,远程 ssh 排查)
+状态: neo 单机已止血(pkill keep_canned_top 后立即恢复正常切窗)
+
+★ 临时处置:
+  ssh kenchoios@100.68.57.96 'pkill -f keep_canned_top.sh'
+  实证: kill 后 ps aux | grep keep_canned_top.sh 无输出,
+       用户切 Terminal 不再被弹回罐头 ✓
+
+★ 待真修:
+  - 选 A:把 keep_canned_top.sh 加白名单(Terminal/iTerm/VSCode/Finder 之外的 App
+    frontmost 时不动),避免短瞬切窗误抢
+  - 选 B:加 osascript 防抖(连续 N 次都判 Finder 才 activate),滤掉短瞬空隙
+  - 选 C:放弃这个守护,各机看实测决定是否需要(neo2 / air 没装也不抢 → 守护可能本就非必要)
+  - 选 D:守护加 frontmost 白名单 Terminal/VSCode/Claude/Chrome/Safari 时 sleep 5s 不动,给用户切窗时间
+  落地方/范围: 决策定后改 工具/keep_canned_top.sh + 重新部署到 mini(目前在跑这版)+ 各机自取
+
 --- [2026-04-30 01:00] [mini 文章定时] [gtg_timer.py 缺「本轮已发」中断恢复机制] ---
 现象: gtg_timer.py(v1101.3 / mac)启动时不读「本轮已发」sheet,
       中断后重启会从任务 1 重新展开早+中+晚 450 任务,
