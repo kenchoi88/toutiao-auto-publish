@@ -28,6 +28,62 @@
 未修
 ============================================================
 
+--- [2026-04-30 13:00] [全队] [v1101.x 待修缺陷攒清单 — 攒齐再出大版本] ---
+现象/动机: 04-30 凌晨到下午一连串实证发现 5 个 v1101.3 主线缺陷,
+      逐个改风险大,缺哥决定攒一波统一改成 v1101.4(或 v1102),版本规划时一并落。
+影响: 各机仍可用 v1101.3 跑发文(已落地 4 Mac),只是有"漏发/抖动/补漏写不进 sheet"几个
+      记账缺陷,会让"漏发账号补漏"机制依赖人工查日志而非 sheet。
+
+★ 缺陷清单(每条附实证):
+
+  ① mac/gtg_timer.py 缺「本轮已发」中断恢复机制
+     位置: 全文 grep "本轮已发" 命中 0(微头条 gtg_batch.py 有此机制 line 2356)
+     现象: 中断后重启会从 task 1 重新展开,已发的早窗会重发(同号同日双发,扣 quota)
+     临时: 仅 mini 单机 hotfix(标 "[hotfix 中断恢复]",未冠版本号),其他 Mac 维持原版
+     大版本修法: 把 hotfix 4 函数(_slot_of/_read_round_sent/_append_round_sent/_clear_round_sent)
+                 + 主循环 skip + success 写入 + _finalize_config 前清空,合入 mac/gtg_timer.py 主线
+                 v1101.4 spec 声明该机制为 mac 文章定时基线一部分。
+
+  ② mac/gtg_timer.py「待补漏」sheet 不存在时跳过写(line 2005)
+     代码: `if "待补漏" in wb.sheetnames: ...` 没 else create_sheet 分支
+     现象: 04-30 mini 跑完后日志报"待补漏写入 6 行(总漏发 8 篇)" 但 xlsx 里**没"待补漏"sheet**,
+           实际数据丢失(只在日志里),后续补漏机制读 sheet 取不到数。
+     临时: 我手动 create_sheet + 写入 6 行(2026-04-30 13:00,mini 单机)
+     大版本修法: line 2005 加 else create_sheet + 写表头["账号名","漏数","失败文稿","登记时间"]
+
+  ③ mac/gtg_timer.py「本轮已发」跳过 task 不平衡 doc_pool
+     现象: 04-30 mini 第 1 次启动跑早窗 8 篇 → 8 doc 移已发送 → 池剩 442;
+           第 2 次启动 hotfix sheet 跳过 8 早 task,doc_pool 重读 442;
+           Stage 1 12 失败 + 1 硬终止,Stage 2 启动报"文档池剩 12 篇,17 个账号待补"
+           → doc 缺 5(17 待补 vs 12 doc) → 5 个号没补到 doc → 漏 5 篇 + 风影 dead 3 = 漏 8
+     根因: hotfix 跳过 task 时,8 个对应的"已发 doc" 永远不再回池,导致 doc_pool 整体少 8
+           (用户原意"从第 9 篇发起"应该理解为"前 8 已占 quota,后续 doc 池仍按完整 450 算")
+     大版本修法(选): a) skip 时记录已发 doc 名,收尾算账时不计漏  b) 启动时把已发送/ 里今日 doc
+                     回扫加入"已占 quota"集合再展开 task,task 跳过后让 doc_pool 多剩 8 给补漏用
+
+  ④ mac/gtg_batch.py / gtg_timer.py 定时下拉 JS 选项点击不可靠
+     现象: mini 04-30 文章定时 Stage 1 12 失败中,7 个(58%)是"定时日期/小时设置失败"
+           日志典型: "X 发布失败: 定时日期设置失败: 4月30日" / "定时小时设置失败: 20"
+           cliclick 点开下拉菜单 + JS 点目标选项,JS 点偶发不命中
+     大版本修法(选): a) 点击后等 200ms + 校验当前选中 → 不中再点一次 + JS dispatchEvent("change")
+                     b) 失败 → 整个定时弹窗重新打开 retry 1 次
+
+  ⑤ mac/gtg_batch.py cliclick 命中按钮边缘失准(neo2 实测,但已确认非主因)
+     现象: neo2 罐头窗口 1408x640 + Retina,cliclick (994,636) 偶发"弹窗未出现",4-5 次重试才中
+     注意: 04-30 实证 neo2 慢主因是物理 WiFi 信号弱,不是 cliclick;
+           切回 Q6 满格后 neo2 ~80s/篇 跟 mini 同款,cliclick 失准只是次要噪声
+     大版本修法(选): cliclick 命中后探测罐头响应,失败立即降级 JS 点击同位置元素,不再 cliclick 重试
+
+谁记的: 绣虎(Win 台机)
+状态: 攒着,等大版本规划
+
+落地策略(待规划):
+  - 一次性合入 mac/gtg_batch.py + gtg_timer.py 主线,标 v1101.4 或 v1102
+  - 各 Mac(mini/air/neo/neo2)统一推同款 md5,Win 台机用相应 win/ 适配版
+  - 仓库 v1101.x/{mac,win}/ 一并更新
+  - 改完跑一轮观察 24h,确认没回归再删 mini 单机的 [hotfix 中断恢复] 标记
+
+
 --- [2026-04-30 11:30] [mini vs 台机] [发文耗时归因诊断:Mac 平台占 91%,网络仅 9%] ---
 现象: 04-30 文章定时实跑,mini(Mac)76.6 秒/篇 vs 台机(Win)43.9 秒/篇,差 32.7 秒(1.74x)。
       mini 跑完整轮 450 篇比台机多花 ~4 小时。
