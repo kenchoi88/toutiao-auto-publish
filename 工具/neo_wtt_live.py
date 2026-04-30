@@ -1,13 +1,21 @@
 """
-创作罐头批量发布脚本 - 图文文章版（Mac）
-  Mac文章自动发布/
-  ├── go.command      双击运行
+[v1101.3] 2026-04-29 微头条 文档导入按钮 hotfix
+  A: 锁 .weitoutiao-import-plugin class 避免 textContent 命中错误候选
+  B: 先 CDP click() 优先,失败再 cliclick 兜底
+[v1101] 2026-04-28 缺哥拍 — 大统一基线
+v1101 改动:Step 3 6s 删 + ProseMirror 取最长 + 字数<50 重试 fill_dialog 1 次
+
+创作罐头批量发布脚本 v3
+项目目录结构:
+  GTG_XXX/
+  ├── 启动.bat
   ├── gtg_batch.py
-  ├── 素材/           放 .docx 文件
-  │   └── 已发送/     发完自动移入
-  ├── gtg_log.txt
-  ├── 失败记录.xlsx
-  └── 系统通知提醒.txt
+  ├── 素材/           (放 .docx 文件)
+  │   └── 已发送/     (发完自动移入)
+  ├── gtg_log.txt     (运行日志)
+  ├── 失败记录.xlsx   (发布失败的账号)
+  ├── 高阅读量提醒.txt (阅读量超标时写入)
+  └── 系统通知提醒.txt (检测到处罚消息时写入)
 """
 
 import requests
@@ -19,8 +27,11 @@ import shutil
 import glob
 import sys
 import random
+import subprocess
 import re
+import threading
 from datetime import datetime, timedelta
+import docx as docxlib
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
@@ -31,22 +42,22 @@ def _find_cdp_port():
         with open(port_file) as f:
             return int(f.readline().strip())
     except Exception:
-        return 9225
+        return 9223  # fallback
 
-CDP_URL          = f"http://127.0.0.1:{_find_cdp_port()}"
-ACCOUNT_CLASS    = "account-RALrbJ"
-WAIT_LOAD        = 4
-EXCLUDE_ACCOUNTS = ["青春小馆"]
+CDP_URL        = f"http://127.0.0.1:{_find_cdp_port()}"   # 自动检测罐头CDP端口
+DEFAULT_TAG    = "原机构老号"               # 启动时未选择则使用此默认标签
+ACCOUNT_CLASS  = "account-RALrbJ"
+WAIT_LOAD      = 4
+ALERT_THRESHOLD = 5000                     # 阅读量超过此值时写入提醒文件
+EXCLUDE_ACCOUNTS = ["青春小馆"]            # 永不发文的账号（母账号等）
 NOFIRST_ACCOUNTS = set()                   # 不选头条首发的账号（从nofirst.txt加载）
 
-NO_PROXY = {"http": "", "https": ""}
-WS_OPTS  = {"suppress_origin": True}
+NO_PROXY       = {"http": "", "https": ""}
+WS_OPTS        = {"suppress_origin": True}
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 DOCS_FOLDER = os.path.join(BASE_DIR, "素材")
 SENT_FOLDER = os.path.join(BASE_DIR, "素材", "已发送")
-ALERT_THRESHOLD  = 5000
-
 # 运行报告路径（main()开始时动态初始化）
 RUN_REPORT_DIR   = None
 LOG_FILE         = None
@@ -55,15 +66,15 @@ NOTICE_FILE      = None
 ALERT_FILE       = None
 VIOLATION_FILE   = None
 
-os.environ["NO_PROXY"] = "127.0.0.1,localhost"
-# ================================================
-
-
 VIOLATION_KEYWORDS = {
     "违规/扣分": ["违规", "扣分", "处罚", "警告"],
     "禁言封号": ["禁言", "发言受限", "封禁", "封号"],
     "原创侵权": ["原创违规", "侵权", "重复内容"],
 }
+
+# 绕过系统代理（避免 127.0.0.1 被代理拦截）
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+# ================================================
 
 # ========== 账号配置 Excel ==========
 CONFIG_EXCEL  = os.path.join(BASE_DIR, "账号配置.xlsx")
@@ -74,10 +85,10 @@ _SUMMARY_HEADERS = ["账号名", "轮次", "发文时间", "失败时间", "补�
 _HARD_TERMINATE_HEADERS = ["账号名", "终止原因", "终止时间", "本次已发篇数"]
 
 # 4 类硬终止 reason — 命中即永久放弃,不再尝试
-HARD_TERMINATE_REASONS = {"封号", "禁言", "侧边栏未找到", "信用分过低"}  # [v1101.1] 失登 移除(改软重试),加 信用分过低
+HARD_TERMINATE_REASONS = {"封号", "禁言", "侧边栏未找到", "信用分过低"}  # [v1101.1] 失登移出, 加信用分过低
 
 def _ensure_config_excel():
-    """如果账号配置.xlsx不存在则自动创建;已存在则确保关键 sheet 有表头"""
+    """如果账号配置.xlsx不存在则自动创建；已存在则确保关键 sheet 有表头"""
     if not os.path.exists(CONFIG_EXCEL):
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -118,37 +129,6 @@ def _ensure_summary_excel():
         wb.save(SUMMARY_EXCEL)
     except Exception:
         pass
-
-
-def _read_whitelist_with_quota():
-    """读白名单sheet：A列账号 + B列配额（空/非数字视为1）。返回 {账号: 配额}"""
-    if not os.path.exists(CONFIG_EXCEL):
-        return {}
-    try:
-        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
-        if "白名单" not in wb.sheetnames:
-            wb.close()
-            return {}
-        ws_r = wb["白名单"]
-        result = {}
-        for row in ws_r.iter_rows(min_row=2, max_col=2, values_only=True):
-            name = row[0]
-            if not name or not str(name).strip() or str(name).strip().startswith('#'):
-                continue
-            name = str(name).strip()
-            q_raw = row[1] if len(row) > 1 else None
-            try:
-                q = int(q_raw) if q_raw is not None and str(q_raw).strip() != "" else 1
-            except Exception:
-                q = 1
-            if q < 1:
-                q = 1
-            result[name] = q
-        wb.close()
-        return result
-    except Exception:
-        return {}
-
 
 def _read_excel_sheet(sheet_name):
     """读取账号配置.xlsx指定sheet的A列账号（跳过第1行标题，忽略空行和#开头）"""
@@ -227,7 +207,7 @@ def _read_fail_list():
         return []
 
 def _remove_from_fail_list(name):
-    """补发成功后，从失败列表里删除该账号的所有记录"""
+    """补发成功后从失败列表里删该账号所有记录"""
     try:
         if not os.path.exists(CONFIG_EXCEL):
             return
@@ -246,7 +226,7 @@ def _remove_from_fail_list(name):
         pass
 
 def _append_summary(name, round_num, event_type, ts=None):
-    """往独立 发文汇总.xlsx 追加/更新。event_type: 发文时间/失败时间/补发成功时间"""
+    """往独立 发文汇总.xlsx 追加/更新。event_type: '发文时间'/'失败时间'/'补发成功时间'"""
     if ts is None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     col_map = {"发文时间": 3, "失败时间": 4, "补发成功时间": 5}
@@ -290,11 +270,6 @@ def _append_hard_terminate(name, reason, count_so_far):
     except Exception:
         pass
 
-
-
-
-
-
 def _clear_round_sheets():
     """轮末齐活后清空 本轮已发 和 失败列表（保留表头）"""
     try:
@@ -333,7 +308,6 @@ def _sort_summary_by_account():
     except Exception:
         pass
 
-
 # =====================================
 
 
@@ -349,6 +323,8 @@ def _init_run_dir():
     VIOLATION_FILE = os.path.join(RUN_REPORT_DIR, "违规提醒.txt")
 
 
+# ========== 日志 ==========
+
 def log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
@@ -357,6 +333,36 @@ def log(msg):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
+
+# ========== 状态文件 (实时刷新) ==========
+
+STATUS_FILE = os.path.join(BASE_DIR, "当前状态.txt")
+
+def write_status(big_round=None, sub_round=None, phase=None,
+                 total_done=0, total_target=0, doc_pool_size=0,
+                 sub_failed=0, dead_terminated=None, extra=""):
+    """实时刷新状态文件,你随时打开就能看到当前进度"""
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"[更新于 {ts}]"]
+        if big_round is not None:
+            lines.append(f"当前: 第 {big_round} 大循环 / 第 {sub_round} 小轮 / {phase}")
+        lines.append(f"累计已发: {total_done} / {total_target} 篇")
+        lines.append(f"文档池剩余: {doc_pool_size} 篇")
+        if sub_failed:
+            lines.append(f"本小轮失败队列: {sub_failed} 个账号")
+        dead_terminated = dead_terminated or {}
+        lines.append(f"硬终止: {len(dead_terminated)} 个" +
+                     (f" {list(dead_terminated.keys())}" if dead_terminated else ""))
+        if extra:
+            lines.append(extra)
+        with open(STATUS_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
+# ========== 失败记录 Excel ==========
 
 def write_fail_excel(final_fails):
     """final_fails: [(ts, account_name, reason), ...] 只写最终失败账号"""
@@ -382,6 +388,8 @@ def write_fail_excel(final_fails):
         log(f"  写入失败记录出错: {e}")
 
 
+# ========== CDP 基础 ==========
+
 def get_tabs():
     return requests.get(f"{CDP_URL}/json", timeout=5, proxies=NO_PROXY).json()
 
@@ -391,7 +399,7 @@ def get_main_ws_url():
     for t in tabs:
         if "czgts.cn" in t.get("url", "") and "webSocketDebuggerUrl" in t:
             return t["webSocketDebuggerUrl"]
-    raise RuntimeError("找不到主窗口，请确认创作罐头已启动")
+    raise RuntimeError(f"找不到主窗口，请确认创作罐头已用 --remote-debugging-port={CDP_URL.split(':')[-1]} 启动")
 
 
 def ws_connect(url, timeout=10):
@@ -424,8 +432,205 @@ def click(ws, x, y, mid):
     cdp(ws, "Input.dispatchMouseEvent", {"type": "mouseReleased", **p}, mid + 1)
 
 
+def click_text(ws, text, mid, area_top=None, area_bottom=None):
+    text_json = json.dumps(text)
+    area_check = ""
+    if area_top is not None:
+        area_check += f" && r.top >= {area_top}"
+    if area_bottom is not None:
+        area_check += f" && r.top < {area_bottom}"
+    v = js(ws, f"""
+    (function(){{
+        var all = document.querySelectorAll('*');
+        for(var i=0;i<all.length;i++){{
+            var t = all[i].textContent.trim();
+            if(t === {text_json} && all[i].children.length <= 2){{
+                var r = all[i].getBoundingClientRect();
+                if(r.width > 0{area_check})
+                    return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
+            }}
+        }}
+        return null;
+    }})()
+    """, mid)
+    if v:
+        p = json.loads(v)
+        click(ws, p["x"], p["y"], mid + 1)
+        return True
+    return False
+
+
+# ========== 打开筛选面板 ==========
+
+def _open_filter_panel(main_ws):
+    """点击筛选图标，返回是否成功打开"""
+    v = js(main_ws, """
+    (function(){
+        var candidates = document.querySelectorAll('[class*="filter"],[class*="Filter"],[class*="funnel"],[class*="screen"]');
+        for(var i=0;i<candidates.length;i++){
+            var r = candidates[i].getBoundingClientRect();
+            if(r.width > 0 && r.width < 60 && r.top > 0 && r.top < 200)
+                return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
+        }
+        var search = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
+        if(search){
+            var r = search.getBoundingClientRect();
+            return JSON.stringify({x:Math.round(r.right+20), y:Math.round(r.top+r.height/2)});
+        }
+        return null;
+    })()
+    """, 102)
+    if v:
+        p = json.loads(v)
+        click(main_ws, p["x"], p["y"], 103)
+        time.sleep(1.2)
+        return True
+    return False
+
+
+def _close_filter_panel(main_ws):
+    cdp(main_ws, "Input.dispatchKeyEvent", {
+        "type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27
+    }, 109)
+    time.sleep(0.5)
+
+
+# ========== 交互式标签选择 ==========
+
+def get_available_tags(main_ws):
+    """
+    打开筛选面板，读取所有可用标签列表。
+    返回标签名列表，如读取失败返回空列表。
+    """
+    log("读取可用标签列表...")
+
+    click_text(main_ws, "账号管理", 101, area_top=0, area_bottom=800)
+    time.sleep(1.5)
+
+    opened = _open_filter_panel(main_ws)
+    if not opened:
+        log("  警告: 未能打开筛选面板，跳过标签读取")
+        return []
+
+    tags_raw = js(main_ws, """
+    (function(){
+        var SKIP = ['全部','确定','取消','清除','清除筛选','确认','搜索','标签','分组',
+                    '账号类型','平台','状态','按名称','排序','筛选'];
+        // 尝试找筛选弹出容器
+        var panel = document.querySelector(
+            '[class*="popover"],[class*="Popover"],[class*="dropdown"],[class*="Dropdown"],' +
+            '[class*="filter-panel"],[class*="filterPanel"],[class*="FilterPanel"]'
+        );
+        var root = panel || document.body;
+        var items = root.querySelectorAll('span,label,li');
+        var tags = [];
+        for(var i=0;i<items.length;i++){
+            var t = items[i].textContent.trim();
+            if(!t || t.length < 1 || t.length > 20) continue;
+            if(items[i].children.length > 0) continue;
+            if(SKIP.indexOf(t) !== -1) continue;
+            if(/^\d+$/.test(t)) continue;
+            var r = items[i].getBoundingClientRect();
+            if(r.width > 0 && r.top > 100) tags.push(t);
+        }
+        return JSON.stringify([...new Set(tags)]);
+    })()
+    """, 108)
+
+    _close_filter_panel(main_ws)
+
+    try:
+        tags = json.loads(tags_raw) if tags_raw else []
+    except:
+        tags = []
+
+    log(f"  读取到 {len(tags)} 个标签: {tags}")
+    return tags
+
+
+def select_tag_interactively(main_ws):
+    """
+    从创作罐头读取标签列表，让用户交互选择。
+    返回选定的标签名。
+    """
+    tags = get_available_tags(main_ws)
+
+    print("\n" + "=" * 45)
+    if tags:
+        print("检测到以下标签：")
+        for i, tag in enumerate(tags, 1):
+            print(f"  {i}. {tag}")
+        print(f"\n默认标签: {DEFAULT_TAG}")
+        print("请输入标签序号 (直接回车使用默认):")
+        try:
+            choice = input("> ").strip()
+        except EOFError:
+            choice = ""
+        if choice.isdigit() and 1 <= int(choice) <= len(tags):
+            selected = tags[int(choice) - 1]
+        else:
+            selected = DEFAULT_TAG
+    else:
+        print(f"未能读取标签列表，使用默认标签: {DEFAULT_TAG}")
+        selected = DEFAULT_TAG
+
+    print(f"已选标签: {selected}")
+    print("=" * 45 + "\n")
+    log(f"本次使用标签: {selected}")
+    return selected
+
+
+# ========== 标签筛选 ==========
+
+def setup_tag_filter(main_ws, tag_name):
+    log(f"设置标签筛选: {tag_name}")
+
+    ok = click_text(main_ws, "账号管理", 101, area_top=0, area_bottom=800)
+    if not ok:
+        log("  警告: 未找到账号管理导航，尝试继续")
+    time.sleep(1.5)
+
+    _open_filter_panel(main_ws)
+
+    ok = click_text(main_ws, "清除筛选", 104)
+    if ok:
+        time.sleep(0.8)
+        log("  已清除筛选")
+
+    tag_json = json.dumps(tag_name)
+    v = js(main_ws, f"""
+    (function(){{
+        var all = document.querySelectorAll('*');
+        for(var i=0;i<all.length;i++){{
+            var t = all[i].textContent.trim();
+            if(t === {tag_json}){{
+                var r = all[i].getBoundingClientRect();
+                if(r.width > 0)
+                    return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
+            }}
+        }}
+        return null;
+    }})()
+    """, 105)
+    if v:
+        p = json.loads(v)
+        click(main_ws, p["x"], p["y"], 106)
+        time.sleep(1)
+        log(f"  已勾选标签: {tag_name}")
+    else:
+        log(f"  警告: 未找到标签 [{tag_name}]，将处理所有可见账号")
+        _close_filter_panel(main_ws)
+        return False
+
+    _close_filter_panel(main_ws)
+    return True
+
+
+# ========== 收集账号列表 ==========
+
 def collect_accounts(main_ws):
     log("开始收集账号列表...")
+
     js(main_ws, """
     (function(){
         var c = document.querySelector('[class*="menuMainWarpper"]');
@@ -437,7 +642,7 @@ def collect_accounts(main_ws):
     accounts = []
     seen = set()
     same_count = 0
-    has_scrolled = False
+    has_scrolled = False  # 曾经成功滚动过才开始计退出条件
 
     for _ in range(1000):
         v = js(main_ws, f"""
@@ -451,8 +656,10 @@ def collect_accounts(main_ws):
             return JSON.stringify(names);
         }})()
         """, 111)
+
         if v:
-            for n in json.loads(v):
+            names = json.loads(v)
+            for n in names:
                 if n not in seen:
                     seen.add(n)
                     accounts.append(n)
@@ -466,18 +673,19 @@ def collect_accounts(main_ws):
             return before + '->' + c.scrollTop;
         })()
         """, 112)
-        time.sleep(0.3)
+        time.sleep(1.0)
 
         if result and result != "no":
             parts = result.split("->")
             if len(parts) == 2:
-                before_top, after_top = parts[0].strip(), parts[1].strip()
+                before_top = parts[0].strip()
+                after_top = parts[1].strip()
                 if after_top != '0' and after_top != before_top:
                     has_scrolled = True
                     same_count = 0
                 elif before_top == after_top and has_scrolled:
                     same_count += 1
-                    if same_count >= 4:
+                    if same_count >= 6:
                         break
 
     # 兜底:虚拟滚动列表,最后几个账号常因 lazy render 漏读
@@ -514,6 +722,8 @@ def collect_accounts(main_ws):
     log(f"共收集到 {len(accounts)} 个账号")
     return accounts
 
+
+# ========== 滚动查找并点击账号 ==========
 
 def scroll_find_account(main_ws, name):
     name_json = json.dumps(name)
@@ -642,6 +852,8 @@ def scroll_find_account(main_ws, name):
     return None
 
 
+# ========== webview 精确匹配（含3次重试） ==========
+
 def _find_webview_once(main_ws, name):
     partition = js(main_ws, """
     (function(){
@@ -659,6 +871,7 @@ def _find_webview_once(main_ws, name):
     """, 15)
 
     if not partition:
+        log("  警告: 未找到 partition")
         return None
 
     marker = f"_mk{random.randint(100000, 999999)}"
@@ -678,7 +891,9 @@ def _find_webview_once(main_ws, name):
         "timeout": 8000
     }, 200)
 
-    if r.get("result", {}).get("value") != "ok":
+    inject_result = r.get("result", {}).get("value")
+    if inject_result != "ok":
+        log(f"  警告: 标记注入结果={inject_result}")
         return None
 
     tabs = get_tabs()
@@ -727,7 +942,13 @@ def get_url_from_ws(ws_url):
         return ""
 
 
+# ========== 系统通知检测 ==========
+
 def check_system_notice(ws_url, account_name):
+    """
+    导航到消息中心 → 分别点击系统通知、审核通知频道
+    → 只读取当天的消息原文写入 NOTICE_FILE
+    """
     try:
         today = datetime.now()
         today_full = today.strftime("%Y-%m-%d")
@@ -745,11 +966,12 @@ def check_system_notice(ws_url, account_name):
         notices = []
 
         for channel in ["系统通知", "审核通知"]:
+            channel_json = channel.replace('"', '\"')
             clicked = js(wsc, f"""
             (function(){{
                 var spans = document.querySelectorAll('span.name');
                 for(var i=0;i<spans.length;i++){{
-                    if(spans[i].textContent.trim() === "{channel}"){{
+                    if(spans[i].textContent.trim() === "{channel_json}"){{
                         var box = spans[i].closest('.conversation-box-primary') || spans[i].parentElement;
                         if(box){{ box.click(); return 'ok'; }}
                     }}
@@ -792,7 +1014,8 @@ def check_system_notice(ws_url, account_name):
 
             if result:
                 try:
-                    for msg in json.loads(result):
+                    msgs = json.loads(result)
+                    for msg in msgs:
                         notices.append(f"【{channel}】{msg}")
                 except:
                     pass
@@ -811,12 +1034,12 @@ def check_system_notice(ws_url, account_name):
                             violations.append((cat, n))
                             break
             # 写系统通知
-            content = f"[{ts}] 账号 {account_name} 当天通知:\n"
+            content_str = f"[{ts}] 账号 {account_name} 当天通知:\n"
             for n in notices:
-                content += f"  {n}\n"
-            content += "\n"
+                content_str += f"  {n}\n"
+            content_str += "\n"
             with open(NOTICE_FILE, "a", encoding="utf-8") as f:
-                f.write(content)
+                f.write(content_str)
             log(f"  ⚠ 当天通知 {len(notices)} 条")
             # 写违规提醒
             if violations:
@@ -829,15 +1052,19 @@ def check_system_notice(ws_url, account_name):
                 violation_count = len(violations)
                 log(f"  ⚠ 违规/扣分 {violation_count} 条 → 违规提醒.txt")
         else:
-            log("  系统/审核通知: 近三天无新通知")
+            log("  系统/审核通知: 当天无新通知")
         return len(notices), violation_count
     except Exception as e:
         log(f"  系统通知检测出错: {e}")
         return 0, 0
 
+# ========== 阅读量检测 ==========
 
 def check_reading_stats(ws_url, account_name):
-    """导航到主页 → 读取最近文章阅读量，超过 ALERT_THRESHOLD 则写入 ALERT_FILE。"""
+    """
+    导航到数据概览页 → 读取三篇文章的阅读量。
+    任一超过 ALERT_THRESHOLD 则写入 ALERT_FILE。
+    """
     try:
         wsc = ws_connect(ws_url, timeout=8)
         js(wsc, "location.href='https://mp.toutiao.com/profile_v4/index'", 310)
@@ -871,7 +1098,7 @@ def check_reading_stats(ws_url, account_name):
         reads = json.loads(reads_raw) if reads_raw else []
         if not reads:
             log("  阅读量: 未读取到数据")
-            return
+            return 0
 
         counts = [r['count'] for r in reads]
         log(f"  阅读量: {counts}")
@@ -892,19 +1119,26 @@ def check_reading_stats(ws_url, account_name):
         return 0
 
 
+# ========== 账号状态检测 ==========
+
+ERROR_KEYWORDS = {
+    "失登": ["请登录", "登录已失效", "账号已下线", "重新登录"],
+    "封号": ["账号已被封禁", "账号异常", "账号被封", "账号不可用"],
+    "禁言": ["账号被禁言", "发言受限", "无法发布"],
+    "限流": ["操作频繁", "请稍后再试", "访问受限"],
+}
+
+
 def detect_account_error(wsc):
     page_text = js(wsc, "document.body.innerText || ''", 70) or ""
-    for reason, keywords in {
-        "失登": ["请登录", "登录已失效", "账号已下线", "重新登录"],
-        "封号": ["账号已被封禁", "账号异常", "账号被封"],
-        "禁言": ["账号被禁言", "发言受限", "无法发布"],
-        "限流": ["操作频繁", "请稍后再试"],
-    }.items():
+    for reason, keywords in ERROR_KEYWORDS.items():
         for kw in keywords:
             if kw in page_text:
                 return reason
     return None
 
+
+# ========== 弹窗 & Tab ==========
 
 def close_popup(ws):
     v = js(ws, """
@@ -947,45 +1181,19 @@ def close_current_tab(main_ws):
         log("  未找到tab关闭按钮")
 
 
-# ========== 文件选择对话框（Mac） ==========
+# ========== 读取文档 ==========
 
-def _fill_mac_file_dialog(doc_path, result_holder):
-    """等 Mac 文件选择对话框出现，用 osascript 填入路径并确认"""
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        # 检测文件选择对话框是否在前台
-        check = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to get name of first process whose frontmost is true'],
-            capture_output=True, text=True
-        )
-        front = check.stdout.strip()
-        if front in ("electron", "创作罐头", "Electron"):
-            # 尝试发 Cmd+Shift+G 打开路径输入框（Mac 文件对话框快捷键）
-            subprocess.run(["osascript", "-e", """
-tell application "System Events"
-    keystroke "g" using {command down, shift down}
-end tell
-"""], capture_output=True)
-            time.sleep(0.5)
-            # 输入路径并回车确认
-            subprocess.run(["osascript", "-e", f"""
-tell application "System Events"
-    keystroke "{doc_path}"
-    key code 36
-    delay 0.5
-    key code 36
-end tell
-"""], capture_output=True)
-            result_holder[0] = True
-            return
-        time.sleep(0.5)
-    result_holder[0] = False
+def read_docx_text(doc_path):
+    doc = docxlib.Document(doc_path)
+    lines = [p.text for p in doc.paragraphs if p.text.strip()]
+    return '\n'.join(lines)
 
 
-# ========== 发布流程（图文文章） ==========
+# ========== 发布流程 ==========
 
 def publish_article(ws_url, doc_path, main_ws, account_name="", _credit_out=None):
+    import subprocess, threading
+
     try:
         wsc = ws_connect(ws_url, timeout=10)
     except Exception as e:
@@ -997,33 +1205,22 @@ def publish_article(ws_url, doc_path, main_ws, account_name="", _credit_out=None
         wsc.close()
         return False, err
 
-    # 导航到图文发布页
-    js(wsc, "location.href='https://mp.toutiao.com/profile_v4/graphic/publish'", 60)
+    js(wsc, "location.href='https://mp.toutiao.com/profile_v4/weitoutiao/publish'", 60)
     wsc.close()
-    time.sleep(4)
+    time.sleep(3)
 
-    # 导航后 target id 会变，从 tabs 里重新找 graphic/publish 页面
-    new_ws_url = None
     for _ in range(12):
-        tabs = get_tabs()
-        for t in tabs:
-            if "graphic/publish" in t.get("url","") and "webSocketDebuggerUrl" in t:
-                new_ws_url = t["webSocketDebuggerUrl"]
-                break
-        if new_ws_url:
+        if "weitoutiao/publish" in get_url_from_ws(ws_url):
             break
         time.sleep(0.5)
 
-    if not new_ws_url:
-        return False, "导航到发文页失败"
-
     try:
-        wsc = ws_connect(new_ws_url, timeout=10)
+        wsc = ws_connect(ws_url, timeout=10)
     except Exception as e:
         return False, f"重连失败: {e}"
 
     close_popup(wsc)
-    time.sleep(1)
+    time.sleep(0.5)
 
     current_url = js(wsc, "location.href", 59) or ""
     if "login" in current_url:
@@ -1035,58 +1232,38 @@ def publish_article(ws_url, doc_path, main_ws, account_name="", _credit_out=None
         wsc.close()
         return False, err
 
-    import subprocess, threading
-
-    # 取 webview 屏幕坐标（草稿条关闭用）
-    wv_early = js(main_ws, """
-    (function(){
-        var wvs = document.querySelectorAll('webview');
-        var maxArea = 0, best = null;
-        for(var i=0;i<wvs.length;i++){
-            var r = wvs[i].getBoundingClientRect();
-            var area = r.width * r.height;
-            if(area > maxArea){ maxArea = area; best = r; }
-        }
-        if(!best) return null;
-        return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
-    })()
-    """, 57)
-    wv_early = json.loads(wv_early) if wv_early else None
-
-    # 关闭草稿提示条（cliclick 点 × 按钮）
-    draft_close = js(wsc, """
-    (function(){
-        var els = document.querySelectorAll('*');
-        for(var i=0;i<els.length;i++){
-            var t = els[i].textContent.trim();
-            if(t === '\u7ee7\u7eed\u7f16\u8f91'){
-                var bar = els[i].closest('[class]');
-                while(bar){
-                    var x = bar.querySelector('[class*="close"],[class*="Close"]');
-                    if(x){
-                        var r = x.getBoundingClientRect();
-                        if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
-                    }
-                    bar = bar.parentElement && bar.parentElement.closest('[class]');
-                    if(!bar) break;
+    # 点底部"文档导入"按钮（轮询等待页面加载，最多等10秒）
+    v = None
+    for _ in range(20):
+        v = js(wsc, """
+        (function(){
+            var btn = document.querySelector('.weitoutiao-import-plugin');
+            if(btn){
+                var r = btn.getBoundingClientRect();
+                if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2), via:'class'});
+            }
+            var els = document.querySelectorAll('*');
+            for(var i=0;i<els.length;i++){
+                var t = els[i].textContent.trim();
+                if(t === '\u6587\u6863\u5bfc\u5165' && els[i].children.length <= 2){
+                    var r2 = els[i].getBoundingClientRect();
+                    if(r2.width > 0) return JSON.stringify({x:Math.round(r2.left+r2.width/2), y:Math.round(r2.top+r2.height/2), via:'text'});
                 }
             }
-        }
-        return null;
-    })()
-    """, 58)
-
-    if draft_close and wv_early:
-        dc = json.loads(draft_close)
-        dc_x = wv_early['sx'] + dc['x']
-        dc_y = wv_early['sy'] + dc['y']
-        log(f"  关闭草稿条: cliclick ({dc_x},{dc_y})")
-        subprocess.run(["cliclick", f"c:{dc_x},{dc_y}"], capture_output=True)
+            return null;
+        })()
+        """, 62)
+        if v:
+            break
         time.sleep(0.5)
-    else:
-        log("  无草稿提示条")
 
-    # 取 webview 真实屏幕坐标
+    if not v:
+        wsc.close()
+        return False, "找不到文档导入按钮"
+
+    p = json.loads(v)
+
+    # 取 webview 真实屏幕坐标，用 cliclick 真实点击（CDP 合成点击无法触发弹窗）
     wv_s = js(main_ws, """
     (function(){
         var wvs = document.querySelectorAll('webview');
@@ -1106,34 +1283,12 @@ def publish_article(ws_url, doc_path, main_ws, account_name="", _credit_out=None
         return False, "无法获取 webview 屏幕坐标"
 
     wv0 = json.loads(wv_s)
+    import_x = wv0['sx'] + p['x']
+    import_y = wv0['sy'] + p['y']
+    log(f"  文档导入按钮真实屏幕坐标: ({import_x},{import_y}) via={p.get('via','?')}")
 
-    # 点工具栏最后一个按钮（文档导入图标，轮询等待页面加载，最多等10秒）
-    v = None
-    for _ in range(20):
-        v = js(wsc, """
-        (function(){
-            var btns = Array.from(document.querySelectorAll('.syl-toolbar-button')).filter(function(b){
-                return b.getBoundingClientRect().width > 0;
-            });
-            if(btns.length > 0){
-                var last = btns[btns.length - 1];
-                var r = last.getBoundingClientRect();
-                return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
-            }
-            return null;
-        })()
-        """, 62)
-        if v:
-            break
-        time.sleep(0.5)
-
-    if not v:
-        wsc.close()
-        return False, "找不到文档导入按钮"
-
-    p = json.loads(v)
-
-    # [v1101 P5] 激活强化:unhide + AXRaise + verify frontmost + 重试 3 次
+    import subprocess, threading
+    # [v1101 P5] 强化 activate:unhide + AXRaise + verify frontmost + 重试 3 次
     subprocess.run(["osascript", "-e", """
 tell application "创作罐头" to activate
 delay 0.2
@@ -1156,6 +1311,7 @@ end tell
 """], capture_output=True)
     time.sleep(0.6)
 
+    # 激活后重新取坐标，防止窗口移动
     wv_s2 = js(main_ws, """
     (function(){
         var wvs = document.querySelectorAll('webview');
@@ -1168,22 +1324,73 @@ end tell
         if(!best) return null;
         return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
     })()
-    """, 63)
+    """, 62)
     if wv_s2:
-        wv0 = json.loads(wv_s2)
+        wv0b = json.loads(wv_s2)
+        import_x = wv0b['sx'] + p['x']
+        import_y = wv0b['sy'] + p['y']
+        log(f"  激活后重新校正坐标: ({import_x},{import_y})")
 
-    import_x = wv0['sx'] + p['x']
-    import_y = wv0['sy'] + p['y']
-    log(f"  文档导入按钮CSS坐标:({p['x']},{p['y']}) webview原点:({wv0['sx']},{wv0['sy']}) => 屏幕:({import_x},{import_y})")
+    # 等"已恢复上次编辑"提示条消失（最多等8秒）
+    for _ in range(16):
+        has_dismiss = js(wsc, """
+        (function(){
+            var els = document.querySelectorAll('*');
+            for(var i=0;i<els.length;i++){
+                if(els[i].textContent.trim() === '\u649e\u9500'){
+                    var r = els[i].getBoundingClientRect();
+                    if(r.width > 0) return true;
+                }
+            }
+            return false;
+        })()
+        """, 68)
+        if not has_dismiss:
+            break
+        time.sleep(0.5)
+    log("  准备点击文档导入")
 
-    # 先点标题栏空白处让 webview 获得焦点（标题栏在顶部，不会点到草稿内容）
-    title_x = wv0['sx'] + 400
-    title_y = wv0['sy'] + 50
-    subprocess.run(["cliclick", f"c:{title_x},{title_y}"], capture_output=True)
-    time.sleep(0.5)
-    # [v1101 P7] cliclick 文档导入 + 等弹窗,失败重试 3 次
+    # [v1101.3 B] 先 CDP click(),命中即跳过 cliclick;失败 fallback cliclick
     sel = None
+    cdp_clicked = js(wsc, """
+    (function(){
+        var btn = document.querySelector('.weitoutiao-import-plugin');
+        if(btn){ btn.click(); return true; }
+        return false;
+    })()
+    """, 63)
+    if cdp_clicked:
+        log("  CDP click() 已派发,等弹窗")
+        for _ in range(8):
+            sel = js(wsc, """
+            (function(){
+                var btns = document.querySelectorAll('button');
+                for(var i=0;i<btns.length;i++){
+                    if(btns[i].textContent.trim() === '选择文档'){
+                        var r = btns[i].getBoundingClientRect();
+                        if(r.width > 0) return JSON.stringify({bx: Math.round(r.left+r.width/2), by: Math.round(r.top+r.height/2)});
+                    }
+                }
+                return null;
+            })()
+            """, 64)
+            if sel:
+                log("  OK CDP click 唤出弹窗")
+                break
+            time.sleep(0.5)
+        if not sel:
+            log("  CDP click 未唤出 → cliclick 兜底")
+
+    if not sel:
+        # 先点编辑区空白处让 webview 获得焦点
+        editor_x = wv0b['sx'] + 400 if wv_s2 else wv0['sx'] + 400
+        editor_y = wv0b['sy'] + 200 if wv_s2 else wv0['sy'] + 200
+        subprocess.run(["cliclick", f"c:{editor_x},{editor_y}"], capture_output=True)
+        time.sleep(0.5)
+    # [v1101 P7] cliclick 文档导入 + 等弹窗,失败重试 3 次(每次重 activate + 重读坐标)
     for click_attempt in range(3):
+        if sel:
+            break
         attempt_str = f" [第{click_attempt+1}次]" if click_attempt > 0 else ""
         log(f"  cliclick 点击文档导入 ({import_x},{import_y}){attempt_str}")
         subprocess.run(["cliclick", f"c:{import_x},{import_y}"], capture_output=True)
@@ -1224,6 +1431,7 @@ end tell
                 log(f"  cliclick 第{click_attempt+1}次成功唤出弹窗")
             break
 
+        # 失败 → 重 activate + 重读坐标准备下一次
         if click_attempt < 2:
             log(f"  弹窗未出,重 activate + 重读坐标后重试")
             subprocess.run(["osascript", "-e", """
@@ -1263,31 +1471,52 @@ end tell
 
     if not sel:
         wsc.close()
-        return False, "文档导入弹窗未出现(3 次 cliclick 重试均失败)"
+        return False, "文档导入弹窗未出现(CDP+cliclick 均失败)"
 
+    # 从主窗口取 webview 真实屏幕坐标
+    wv_screen = js(main_ws, """
+    (function(){
+        var wvs = document.querySelectorAll('webview');
+        var maxArea = 0, best = null;
+        for(var i=0;i<wvs.length;i++){
+            var r = wvs[i].getBoundingClientRect();
+            var area = r.width * r.height;
+            if(area > maxArea){ maxArea = area; best = r; }
+        }
+        if(!best) return null;
+        return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
+    })()
+    """, 66)
+
+    if not wv_screen:
+        wsc.close()
+        return False, "无法获取 webview 屏幕坐标"
+
+    wv = json.loads(wv_screen)
     sb = json.loads(sel)
-    screen_x = wv0['sx'] + sb['bx']
-    screen_y = wv0['sy'] + sb['by']
-    log(f"  选择文档屏幕坐标: ({screen_x},{screen_y})")
+    screen_x = wv['sx'] + sb['bx']
+    screen_y = wv['sy'] + sb['by']
+    log(f"  webview屏幕原点:({wv['sx']},{wv['sy']}) 按钮CSS:({sb['bx']},{sb['by']}) => 真实屏幕:({screen_x},{screen_y})")
 
     doc_escaped = doc_path.replace("\\", "/")
     safe_path = doc_escaped.replace("\\", "\\\\").replace('"', '\\"')
     result_holder = [None]
 
     def sheet_exists():
-        r = subprocess.run(["osascript", "-e",
-            'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of window 1)'],
-            capture_output=True, text=True)
+        r = subprocess.run([
+            "osascript", "-e",
+            'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of window 1)'
+        ], capture_output=True, text=True)
         return 'true' in r.stdout.lower()
 
     def go_to_folder_sheet_exists():
-        r = subprocess.run(["osascript", "-e",
-            'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of sheet 1 of window 1)'],
-            capture_output=True, text=True)
+        r = subprocess.run([
+            "osascript", "-e",
+            'tell application "System Events" to tell process "创作罐头" to return (exists sheet 1 of sheet 1 of window 1)'
+        ], capture_output=True, text=True)
         return 'true' in r.stdout.lower()
 
     def get_sheet_rect():
-        """拿主对话框 position+size。entire contents 会超时，但 position/size 直接读很快。"""
         r = subprocess.run(["osascript", "-e", '''
 tell application "System Events"
     tell process "创作罐头"
@@ -1310,7 +1539,6 @@ end tell
         return None
 
     def click_dialog_button(which):
-        """which: 'open' 或 'cancel'。cliclick 物理点击，不经 keystroke，不受 frontmost 焦点影响。"""
         rect = get_sheet_rect()
         if not rect:
             return False
@@ -1325,8 +1553,23 @@ end tell
         time.sleep(0.5)
         return True
 
+    def press_esc(times=2):
+        """兜底关对话框：优先 cliclick 点取消（不受焦点影响），不行再 key code 53。"""
+        click_dialog_button('cancel')
+        for _ in range(times):
+            if not sheet_exists():
+                return
+            subprocess.run(["osascript", "-e", '''
+tell application "System Events"
+    tell process "创作罐头"
+        key code 53
+    end tell
+end tell
+'''], capture_output=True)
+            time.sleep(0.4)
+
     def fill_dialog():
-        # 等对话框出现
+        # 等文件对话框 sheet 出现（最多 15s）
         deadline = time.time() + 15
         appeared = False
         while time.time() < deadline:
@@ -1371,11 +1614,12 @@ end tell
                 'tell application "System Events" to tell process "创作罐头" to key code 53'],
                 capture_output=True)
             time.sleep(0.5)
+            # pbcopy + pbpaste 校验重试
             clipboard_ok = False
             for _ in range(5):
-                subprocess.run(["pbcopy"], input=doc_escaped.encode("utf-8"))
+                subprocess.run(["pbcopy"], input=doc_escaped, text=True)
                 time.sleep(0.15)
-                rb = subprocess.run(["pbpaste"], capture_output=True).stdout.decode("utf-8", errors="replace")
+                rb = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
                 if rb.strip() == doc_escaped.strip():
                     clipboard_ok = True
                     break
@@ -1400,7 +1644,7 @@ tell application "System Events"
 end tell
 '''], capture_output=True)
 
-        # Step 2: 回车关"前往文件夹"小框，最多 5 次
+        # Step 2: 回车关"前往文件夹"小框，最多 5 次（应对 keystroke 焦点偶发丢失）
         go_closed = False
         for i in range(5):
             subprocess.run(["osascript", "-e", '''
@@ -1424,9 +1668,9 @@ end tell
             result_holder[0] = False
             return
 
-        # [v1101 P1] Step 3 跳过:macOS 26 NSOpenPanel 不再自动关,Step 4 必打,6s 硬等纯发呆
+        # [v1101] Step 3 跳过:macOS 26 NSOpenPanel 不再自动关,Step 4 兜底必须打,6s 硬等纯发呆
 
-        # Step 4: 主框没关 → cliclick 物理点"打开"按钮
+        # Step 4: 主对话框没自动关 → cliclick 物理点"打开"按钮
         log("  主对话框未自动关闭 → cliclick 点打开按钮")
         for _ in range(3):
             if not click_dialog_button('open'):
@@ -1437,68 +1681,48 @@ end tell
                     result_holder[0] = True
                     return
 
-        # Step 5: 彻底卡死 → 点取消
+        # Step 5: 彻底卡死 → cliclick 点取消，外层 3 次重试重开
         log("  对话框完全卡死 → cliclick 点取消")
         click_dialog_button('cancel')
         result_holder[0] = False
 
-    # 外层最多 3 次重试，扛住偶发对话框 hang（原本只试 1 次，现加上）
+    # 罐头置顶
+    subprocess.run(["osascript", "-e", """
+tell application "System Events"
+    tell process "创作罐头"
+        set frontmost to true
+    end tell
+end tell
+"""], capture_output=True)
+    time.sleep(0.3)
+
+    # 重试最多 3 次扛偶发 hang
     dialog_ok = False
     for dialog_attempt in range(3):
         result_holder[0] = None
         t = threading.Thread(target=fill_dialog, daemon=True)
         t.start()
         time.sleep(0.2)
+        log(f"  cliclick 点击 ({screen_x},{screen_y})")
         subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
-        t.join(timeout=45)
+        t.join(timeout=30)
         if result_holder[0]:
             dialog_ok = True
             if dialog_attempt > 0:
                 log(f"  文件对话框第{dialog_attempt+1}次成功")
             break
-        # 保险：失败前再点一次取消确保对话框真关了
-        click_dialog_button('cancel')
+        press_esc(2)
         time.sleep(1)
         log(f"  第{dialog_attempt+1}次对话框处理失败，准备重试")
 
     if not dialog_ok:
         wsc.close()
-        return False, "文件选择对话框反复卡住，3次重试均失败"
+        return False, "文件对话框反复卡住，3次重试均失败"
 
-    # 等待内容加载
-    time.sleep(5)
-    char_count = 0
-    for _ in range(15):
-        v = js(wsc, """
-        (function(){
-            // [v1101 P3] 取最长 ProseMirror(避免命中标题 placeholder 5 字)
-            var els = document.querySelectorAll('.ProseMirror');
-            var max = 0;
-            for (var i = 0; i < els.length; i++) {
-                var l = els[i].textContent.trim().length;
-                if (l > max) max = l;
-            }
-            return max;
-        })()
-        """, 75)
-        char_count = int(v) if v else 0
-        if char_count >= 50:
-            break
-        time.sleep(0.8)
-
-    log(f"  文章字数: {char_count}")
-    # [v1101 P2] 字数<50 重试 fill_dialog 一次
-    if char_count < 50:
-        log(f"  对话框已关但字数仅 {char_count}（文档未真导入），重试 fill_dialog")
-        result_holder[0] = None
-        t = threading.Thread(target=fill_dialog, daemon=True)
-        t.start()
-        time.sleep(0.2)
-        subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
-        t.join(timeout=30)
-        time.sleep(5)
-        char_count = 0
-        for _ in range(15):
+    # [v1101] 等内容加载;ProseMirror 取最长元素(避免命中标题 placeholder 5 字)
+    def _read_char_count():
+        cc = 0
+        for _ in range(40):
             v = js(wsc, """
             (function(){
                 var els = document.querySelectorAll('.ProseMirror');
@@ -1510,39 +1734,31 @@ end tell
                 return max;
             })()
             """, 75)
-            char_count = int(v) if v else 0
-            if char_count >= 50:
+            cc = int(v) if v else 0
+            if cc >= 50:
                 break
-            time.sleep(0.8)
+            time.sleep(1.0)
+        return cc
+
+    time.sleep(5)
+    char_count = _read_char_count()
+    log(f"  文章字数: {char_count}")
+
+    # [v1101] 字数 < 50 → 重试 fill_dialog 一次(借鉴 neo retry 机制)
+    if char_count < 50:
+        log(f"  对话框已关但字数仅 {char_count}（文档未真导入），重试 fill_dialog")
+        result_holder[0] = None
+        t = threading.Thread(target=fill_dialog, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
+        t.join(timeout=30)
+        time.sleep(5)
+        char_count = _read_char_count()
         log(f"  重试后字数: {char_count}")
         if char_count < 50:
             wsc.close()
             return False, "文档导入后内容为空(重试1次仍空)"
-
-    # 滚动到页面最底部，等待图片全部加载
-    js(wsc, """
-    (function(){
-        var el = document.querySelector('.ProseMirror') || document.body;
-        el.scrollTop = el.scrollHeight;
-        window.scrollTo(0, document.body.scrollHeight);
-    })()
-    """, 76)
-    time.sleep(2)
-    # 等图片全部加载完
-    for _ in range(20):
-        loading = js(wsc, """
-        (function(){
-            var imgs = document.querySelectorAll('img');
-            for(var i=0;i<imgs.length;i++){
-                if(!imgs[i].complete || imgs[i].naturalWidth === 0) return true;
-            }
-            return false;
-        })()
-        """, 77)
-        if not loading:
-            break
-        time.sleep(0.5)
-    log("  图片加载完成")
 
     # 读取信用分，决定是否勾选头条首发
     credit_raw = js(wsc, """
@@ -1563,13 +1779,13 @@ end tell
     """, 78)
     credit_score = int(credit_raw) if credit_raw is not None else None
     log(f"  信用分: {credit_score if credit_score is not None else '未读取到'}")
-    if _credit_out is not None:
-        _credit_out.append(credit_score)
-    # [v1101.1] 信用分 < 60 → 硬终止,跟禁言/封号同等放弃
+    # [v1101.1] 信用分 < 60 → 硬终止
     if credit_score is not None and credit_score < 60:
         log(f"  ★ 信用分 {credit_score} < 60,硬终止")
         wsc.close()
         return False, "信用分过低"
+    if _credit_out is not None:
+        _credit_out.append(credit_score)
     should_first = (account_name not in NOFIRST_ACCOUNTS) and (credit_score is not None and credit_score >= 95)
 
     # 根据信用分设置头条首发复选框
@@ -1632,140 +1848,48 @@ end tell
     else:
         log("  头条首发: 未找到复选框")
 
-    # 点"预览并发布" + 等"确认发布"，最多重试5次（封面图加载慢时第一次点可能无效）
-    confirm_clicked = False
-    for attempt in range(5):
-        # 每次重新取 webview 屏幕坐标
-        wv_cur_r = js(main_ws, """
-        (function(){
-            var wvs = document.querySelectorAll('webview');
-            var maxArea = 0, best = null;
-            for(var i=0;i<wvs.length;i++){
-                var r = wvs[i].getBoundingClientRect();
-                var area = r.width * r.height;
-                if(area > maxArea){ maxArea = area; best = r; }
+    # 点"发布"
+    v = js(wsc, """
+    (function(){
+        var btns = document.querySelectorAll('button');
+        for(var i=0;i<btns.length;i++){
+            if(btns[i].textContent.trim()==='发布' && !btns[i].disabled){
+                var r = btns[i].getBoundingClientRect();
+                if(r.width>0) return JSON.stringify({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)});
             }
-            if(!best) return null;
-            return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
-        })()
-        """, 79)
-        wv_cur = json.loads(wv_cur_r) if wv_cur_r else wv0
+        }
+        return null;
+    })()
+    """, 90)
 
-        # 找"预览并发布"按钮
-        v = js(wsc, """
-        (function(){
-            var btns = document.querySelectorAll('button');
-            for(var i=0;i<btns.length;i++){
-                if(btns[i].textContent.trim() === '\u9884\u89c8\u5e76\u53d1\u5e03' && !btns[i].disabled){
-                    var r = btns[i].getBoundingClientRect();
-                    if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
-                }
-            }
-            return null;
-        })()
-        """, 80)
-
-        if not v:
-            if attempt == 0:
-                wsc.close()
-                return False, "找不到预览并发布按钮"
-        else:
-            p = json.loads(v)
-            preview_x = wv_cur['sx'] + p['x']
-            preview_y = wv_cur['sy'] + p['y']
-            attempt_str = f" [第{attempt+1}次]" if attempt > 0 else ""
-            log(f"  cliclick 点击预览并发布 ({preview_x},{preview_y}){attempt_str}")
-            subprocess.run(["cliclick", f"m:{preview_x},{preview_y}"], capture_output=True)
-            time.sleep(0.5)
-            subprocess.run(["cliclick", f"c:{preview_x},{preview_y}"], capture_output=True)
-            log("  已点击预览并发布")
-            time.sleep(4)
-
-        # 等"确认发布"按钮
-        for i in range(60):
-            time.sleep(0.5)
-            v2 = js(wsc, """
-            (function(){
-                var btns = document.querySelectorAll('button');
-                for(var i=0;i<btns.length;i++){
-                    var t = btns[i].textContent.trim();
-                    if(t === '\u786e\u8ba4\u53d1\u5e03' || t.indexOf('\u786e\u8ba4\u53d1\u5e03') !== -1){
-                        var r = btns[i].getBoundingClientRect();
-                        if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
-                    }
-                }
-                return null;
-            })()
-            """, 83)
-            if v2:
-                p2 = json.loads(v2)
-                confirm_x = wv_cur['sx'] + p2['x']
-                confirm_y = wv_cur['sy'] + p2['y']
-                log(f"  cliclick 点击确认发布 ({confirm_x},{confirm_y})")
-                subprocess.run(["cliclick", f"c:{confirm_x},{confirm_y}"], capture_output=True)
-                confirm_clicked = True
-                break
-
-        if confirm_clicked:
-            break
-        if attempt < 4:
-            # [v1101 P4] 抓 DOM 写诊断
-            try:
-                diag = js(wsc, """
-                (function(){
-                    var out = [];
-                    var btns = document.querySelectorAll('button');
-                    out.push('btn-tags='+btns.length);
-                    for(var i=0;i<btns.length;i++){
-                        var r = btns[i].getBoundingClientRect();
-                        if(r.width>0 && r.height>0){
-                            out.push('btn['+i+']="'+btns[i].textContent.trim().slice(0,30)+'" disabled='+btns[i].disabled);
-                        }
-                    }
-                    out.push('---含发布字非button可见叶子---');
-                    var all = document.querySelectorAll('*');
-                    for(var i=0;i<all.length;i++){
-                        if(all[i].tagName==='BUTTON') continue;
-                        if(all[i].childElementCount!==0) continue;
-                        var t = all[i].textContent.trim();
-                        if(t.length<25 && t.indexOf('发布')!==-1){
-                            var r = all[i].getBoundingClientRect();
-                            if(r.width>0) out.push(all[i].tagName+'="'+t+'"');
-                        }
-                    }
-                    return out.join(' | ');
-                })()
-                """, 84)
-                log(f"  [DIAG] {diag}")
-            except Exception as e:
-                log(f"  [DIAG] dump失败: {e}")
-            log(f"  确认发布未出现，封面图可能未加载完，准备第{attempt+2}次点击预览并发布...")
-
-    if not confirm_clicked:
+    if not v:
         wsc.close()
-        return False, "未出现确认发布按钮"
+        return False, "找不到发布按钮"
 
-    # 检测发布成功
+    p = json.loads(v)
+    click(wsc, p["x"], p["y"], 91)
+    log("  已点击发布")
+    time.sleep(1)
+
     published = False
     for _ in range(20):
         time.sleep(0.5)
-        t = js(wsc, """
+        t2 = js(wsc, """
         (function(){
             var all = document.querySelectorAll('*');
             for(var i=0;i<all.length;i++){
                 var t = all[i].textContent.trim();
-                if((t==='发布成功！'||t==='发布成功'||t==='提交成功！'||t==='提交成功')
-                   && all[i].children.length<=1)
+                if((t==='发布成功！'||t==='发布成功'||t==='提交成功！'||t==='提交成功') && all[i].children.length<=1)
                     return t;
             }
             return null;
         })()
         """, 96)
-        if t:
+        if t2:
             published = True
             break
         cur_url = js(wsc, "location.href", 97) or ""
-        if "graphic" in cur_url and "publish" not in cur_url:
+        if "weitoutiao" in cur_url and "publish" not in cur_url:
             published = True
             break
 
@@ -1777,7 +1901,7 @@ end tell
         return False, "未检测到发布成功"
 
     wsc.close()
-    log("  OK 文章发布成功")
+    log("  OK 发布成功")
     return True, "成功"
 
 
@@ -1800,33 +1924,6 @@ def move_to_sent(doc_path):
     log(f"  已移至已发送: {os.path.basename(dest)}")
 
 
-STATUS_FILE = os.path.join(BASE_DIR, "当前状态.txt")
-
-
-def write_status(big_round=None, sub_round=None, phase=None,
-                 total_done=0, total_target=0, doc_pool_size=0,
-                 sub_failed=0, dead_terminated=None, extra=""):
-    """实时刷新状态文件,你随时打开就能看到当前进度"""
-    try:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        lines = [f"[更新于 {ts}]"]
-        if big_round is not None:
-            lines.append(f"当前: 第 {big_round} 大循环 / 第 {sub_round} 小轮 / {phase}")
-        lines.append(f"累计已发: {total_done} / {total_target} 篇")
-        lines.append(f"文档池剩余: {doc_pool_size} 篇")
-        if sub_failed:
-            lines.append(f"本小轮失败队列: {sub_failed} 个账号")
-        dead_terminated = dead_terminated or {}
-        lines.append(f"硬终止: {len(dead_terminated)} 个" +
-                     (f" {list(dead_terminated.keys())}" if dead_terminated else ""))
-        if extra:
-            lines.append(extra)
-        with open(STATUS_FILE, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-    except Exception:
-        pass
-
-
 # ========== 死磕主循环 (公共函数) ==========
 
 def run_death_grip(
@@ -1834,20 +1931,21 @@ def run_death_grip(
     per_account_quota,
     doc_pool,
     main_ws,
-    sub_rounds=3,
+    sub_rounds=5,              # 微头条 5,文章/定时 3
     max_fail_per_sub=3,
     sent_accounts_set=None,
     credit_records=None,
-    fail_records=None,
-    success_accounts=None,
+    fail_records=None,         # Mac 风格: list of (ts, name, reason),由 main 持有
+    success_accounts=None,     # Mac 风格: set
     initial_acc_count=None,
     initial_dead=None,
     log_label="",
 ):
     """死磕循环:大循环 N 小轮 + 外层无限磕。
-    - 4 类硬终止 → 即刻永久放弃
+    - 4 类硬终止(失登/封号/禁言/侧边栏未找到) → 即刻永久放弃,写"硬终止账号"sheet
     - 其他失败 → 本小轮内累计 max_fail_per_sub 次跳过本小轮,下小轮恢复
-    - 大循环跑完 + 还有 quota → 继续下一大循环(无限磕)
+    - N 小轮跑完 = 1 大循环;还有 quota 没满且 doc 没空 → 继续下一大循环(无限磕)
+    返回: dict { acc_count, dead_terminated, doc_pool, ok_count, fail_count, total_notices, total_violations, total_alerts }
     """
     sent_accounts_set = sent_accounts_set if sent_accounts_set is not None else set()
     credit_records   = credit_records if credit_records is not None else {}
@@ -2064,7 +2162,7 @@ def run_death_grip(
 def main():
     _init_run_dir()
     log("=" * 50)
-    log("创作罐头图文文章批量发布 Mac版 启动")
+    log("创作罐头批量发布 v3 启动")
     log(f"报告目录: {RUN_REPORT_DIR}")
     log("=" * 50)
 
@@ -2120,7 +2218,8 @@ def main():
 
     docs = get_docs()
     if not docs:
-        log("错误: 素材文件夹中没有 docx 文件")
+        log("错误: 素材文件夹中没有 docx 文件，请放入文档后重试")
+        input("按回车退出...")
         return
 
     log(f"待发文档: {len(docs)} 份")
@@ -2129,11 +2228,16 @@ def main():
         main_ws_url = get_main_ws_url()
     except RuntimeError as e:
         log(f"错误: {e}")
+        input("按回车退出...")
         return
 
     main_ws = ws_connect(main_ws_url, timeout=10)
     log("已连接主窗口")
 
+
+    # 不使用标签筛选，发全部账号（由 EXCLUDE_ACCOUNTS 排除不需要发的账号）
+
+    # 收集账号列表
     accounts = collect_accounts(main_ws)
     if EXCLUDE_ACCOUNTS:
         before = len(accounts)
@@ -2142,46 +2246,36 @@ def main():
         if skipped:
             log(f"已排除 {skipped} 个永不发文账号: {EXCLUDE_ACCOUNTS}")
 
-    # 读取账号配置.xlsx - 白名单 sheet (B 列可指定账号独立配额)
-    quota_map = {}
+    # 读取账号配置.xlsx - 白名单sheet（有内容则只跑白名单内的账号）
     try:
-        _wl_map = _read_whitelist_with_quota()
-        if _wl_map:
-            accounts = [a for a in accounts if any(inc in a or a in inc for inc in _wl_map.keys())]
-            for a in accounts:
-                for inc, q in _wl_map.items():
-                    if inc in a or a in inc:
-                        quota_map[a] = q
-                        break
-            log(f"账号配置.xlsx[白名单]已加载,白名单 {len(_wl_map)} 个,过滤后剩 {len(accounts)} 个账号")
-            log(f"白名单配额: {quota_map}")
+        _include = _read_excel_sheet("白名单")
+        if _include:
+            accounts = [a for a in accounts if any(inc in a or a in inc for inc in _include)]
+            log(f"账号配置.xlsx[白名单]已加载，白名单 {len(_include)} 个，过滤后剩 {len(accounts)} 个账号")
     except Exception as _e:
         log(f"读取账号配置.xlsx[白名单]失败: {_e}")
 
     if not accounts:
-        log("错误: 未找到任何账号")
+        log("错误: 未找到任何账号，请检查创作罐头是否正常登录")
         main_ws.close()
+        input("按回车退出...")
         return
 
-    # 没有白名单独立配额 → 全局 = 总篇数 ÷ 账号数
-    if not quota_map:
-        quota = len(docs) // len(accounts) if len(accounts) > 0 else 1
-        quota = max(quota, 1)
-        quota_map = {a: quota for a in accounts}
-        log(f"本次发布: {len(accounts)} 个账号,{len(docs)} 篇文档,每账号配额 {quota} 篇")
-    else:
-        total_quota = sum(quota_map.get(a, 1) for a in accounts)
-        log(f"本次发布: {len(accounts)} 个账号,{len(docs)} 篇文档,按独立配额共 {total_quota} 篇")
+    # 配额:总篇数÷账号数(死磕模式不再支持补漏专属 quota,统一按平均配额)
+    quota = len(docs) // len(accounts) if len(accounts) > 0 else 1
+    quota = max(quota, 1)
+    quota_map = {a: quota for a in accounts}
+    log(f"本次发布: {len(accounts)} 个账号，{len(docs)} 篇文档，每账号配额 {quota} 篇")
 
     doc_pool = list(docs)
 
-    # 调用死磕主循环 (文章 3 小轮 / 大循环 + 外层无限磕)
+    # 调用死磕主循环 (微头条 5 小轮 / 大循环 + 外层无限磕)
     result = run_death_grip(
         accounts=accounts,
         per_account_quota=quota_map,
         doc_pool=doc_pool,
         main_ws=main_ws,
-        sub_rounds=3,
+        sub_rounds=5,
         max_fail_per_sub=3,
         sent_accounts_set=sent_accounts_set,
         credit_records=credit_records,
@@ -2203,7 +2297,7 @@ def main():
         for d in doc_pool:
             log(f"  未发: {os.path.basename(d)}")
 
-    # 写最终失败记录
+    # 写最终失败记录(放弃账号 + 本次从未成功的账号)
     final_fails = [(ts, n, r) for ts, n, r in fail_records
                    if (n not in success_accounts) or (n in dead_terminated)]
     write_fail_excel(final_fails)
@@ -2236,7 +2330,7 @@ def main():
         "=" * 60,
         f"运行汇总 - {run_time_str}",
         "=" * 60,
-        f"类型    : 文章发布(死磕模式)",
+        f"类型    : 微头条发布(死磕模式)",
         f"报告目录: {RUN_REPORT_DIR}",
         "",
         f"成功发布: {ok_count} 篇",
@@ -2248,7 +2342,7 @@ def main():
         summary_lines.append("")
         summary_lines.append("硬终止账号 (需人工处理):")
         for name, (reason, ts, cnt) in dead_terminated.items():
-            summary_lines.append(f"  - {name}	{reason}	本次已发 {cnt} 篇")
+            summary_lines.append(f"  - {name}\t{reason}\t本次已发 {cnt} 篇")
     summary_lines.extend([
         "",
         f"系统通知: {total_notices} 条  → 系统通知.txt",
