@@ -1761,13 +1761,14 @@ end tell
                 click_dialog_button('cancel')
                 result_holder[0] = False
                 return
+            # 注意:Step 1a/1b 已经唤出"前往文件夹"小框,这里不再重发 Cmd+Shift+G
+            # (重发会把已开的小框关掉或弄错状态,导致后续 Cmd+A/V/回车打到错误位置 → Step 2 关不掉小框)
             subprocess.run(["osascript", "-e", '''
 tell application "创作罐头" to activate
-delay 0.3
+delay 0.2
 tell application "System Events"
     tell process "创作罐头"
-        keystroke "g" using {command down, shift down}
-        delay 1.5
+        set frontmost to true
         keystroke "a" using {command down}
         delay 0.4
         keystroke "v" using {command down}
