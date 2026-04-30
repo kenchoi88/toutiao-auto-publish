@@ -1684,25 +1684,32 @@ end tell
             return
         time.sleep(0.6)
 
-        # Step 1a: Cmd+Shift+G 唤出"前往文件夹"小框
-        subprocess.run(["osascript", "-e", '''
+        # Step 1a+1b: 循环 keystroke Cmd+Shift+G,直到"前往文件夹"小框真出现
+        # 妈家网络下单次 keystroke 经常不唤出小框(罐头响应慢/焦点抖),改成循环重发
+        # 每次都重 activate 罐头并 set frontmost,免得焦点跑去别的应用
+        go_appeared = False
+        for retry in range(5):
+            subprocess.run(["osascript", "-e", '''
 tell application "创作罐头" to activate
-delay 0.2
+delay 0.3
 tell application "System Events"
     tell process "创作罐头"
+        set frontmost to true
         keystroke "g" using {command down, shift down}
     end tell
 end tell
 '''], capture_output=True)
-
-        # Step 1b: 轮询等"前往文件夹" sheet 真出现（最多 8 秒,扛网络慢/罐头响应慢）
-        # 原 delay 1.5 在妈家网络下不够,sheet 还没渲染脚本就 set value of text field 立即报"不能获得 sheet 1 of sheet 1"
-        go_appeared = False
-        for _ in range(40):  # 40 * 0.2 = 8s
-            if go_to_folder_sheet_exists():
-                go_appeared = True
+            # 单次最多等 4 秒
+            for _ in range(20):
+                if go_to_folder_sheet_exists():
+                    go_appeared = True
+                    break
+                time.sleep(0.2)
+            if go_appeared:
+                if retry > 0:
+                    log(f"  前往文件夹 重试 {retry+1} 次后出现")
                 break
-            time.sleep(0.2)
+            log(f"  Cmd+Shift+G 第{retry+1}次未唤出前往文件夹,重试")
 
         direct_ok = False
         direct_err = None
