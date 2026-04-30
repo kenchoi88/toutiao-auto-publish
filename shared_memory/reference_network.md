@@ -53,6 +53,40 @@ originSessionId: 0e9e6cdf-de45-458d-b2ce-c21a71bbed5d
 - DS创作工具/今日头条相关：必须用公共DNS（119.29.29.29 或 223.5.5.5），否则今日头条抓取失败
 - VSCode需V2代理，DS/罐头不能走代理，注意冲突
 
+## 代理踩坑（2026-04-30 阿良在妈家网络实证）
+
+**核心规则: 罐头/头条流量永远走直连,不要被 Shadowrocket/Clash/V2 劫持**
+
+  Shadowrocket 全局代理把 mp.toutiao.com 解析成 198.18.0.24(虚拟 IP),
+  走 utun* 隧道送国外节点。家里网络上行好看似正常,妈家/咖啡店等弱上行
+  网络下,代理 ↔ 国外节点路径抖,罐头 webview 长连接超时+丢包,
+  cliclick/keystroke/osascript click button 全部赶在罐头收到响应之前发出,
+  所有"对话框未弹/按钮无响应/sheet 不消失"的症状都来自这条根因。
+
+  **症状特征**:
+    - cliclick 点"文档导入"3 次都不出"选择文档"小弹窗
+    - "前往文件夹"小框 8s 不出现
+    - osascript click button 报"成功"但 sheet 不消失
+    - 重试 3 次全失败,跨账号稳定复现
+
+  **快诊三步**:
+    1. `scutil --proxy` 看 HTTP/HTTPS Proxy 是否被设(127.0.0.1:1082 等)
+    2. `ps aux | grep -iE "shadowrocket|clash|v2ray|surge"` 看代理进程
+    3. `route get mp.toutiao.com` 看接口 — utun* = 被代理劫持
+
+  **解法**(任选):
+    - 临时: 关掉代理(菜单栏图标点关闭)
+    - 长期: 代理工具加直连规则
+      ```
+      DOMAIN-SUFFIX,toutiao.com,DIRECT
+      DOMAIN-SUFFIX,bytedance.com,DIRECT
+      DOMAIN-SUFFIX,czgts.cn,DIRECT
+      DOMAIN-SUFFIX,snssdk.com,DIRECT
+      ```
+
+  **教训**: 不要先怀疑代码 — 罐头脚本反复出"响应慢/对话框卡"症状时,
+  先排查代理(5 分钟搞定),再去改代码(可能改半天还是网络锅)。
+
 ## 台机debug_launch
 - 台机（192.168.10.8）部署罐头时，`debug_launch.bat` + `debug_launch.py` 绝对不能删
 - bat只写`python "%~dp0debug_launch.py"`，py文件用subprocess启动罐头

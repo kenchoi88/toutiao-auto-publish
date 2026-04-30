@@ -28,6 +28,48 @@
 未修
 ============================================================
 
+--- [2026-04-30 18:15] [air@妈家网络] [微头条] [真根因: Shadowrocket 全局代理把头条流量送国外节点 — 妈家上行差导致代理路径抖] ---
+现象: Air 04-30 17:24~18:00 在妈家网络下,微头条脚本一启动就连续卡:
+      1) cliclick 点"文档导入"按钮 3 次都不出"选择文档"小弹窗
+      2) Cmd+Shift+G 唤"前往文件夹"小框 8s 不出现
+      3) 即便小框唤出,osascript click button"前往"也无效,sheet 不消失
+      → 每篇 27-50秒重试全套,3 次全失败本篇报废。
+      下午出门前 air 在家网络稳没问题。
+
+排查过程:
+  1. 阿良改 fill_dialog 加循环 keystroke + click button —— 仍然失败
+  2. 改 clipboard 回退去掉 Cmd+Shift+G 重发 —— 仍然失败
+  3. 实测 ping mp.toutiao.com → 解析到 198.18.0.24(VPN虚拟IP),走 utun9 接口
+     → 系统 HTTP/HTTPS 代理 = 127.0.0.1:1082 (Shadowrocket)
+     → ps 看到 Shadowrocket + MacPacketTunnel 在跑
+  4. 缺哥关掉 Shadowrocket → 脚本立刻顺畅,所有 fill_dialog 步骤一气呵成
+
+真根因: **Shadowrocket 把头条流量(国内服务)代理到国外节点**。
+  家里网络上行好,代理上行链路稳,看似正常;
+  妈家网络上行差,代理 ↔ 国外节点这条路径抖,头条 backend 响应延迟+丢包,
+  罐头 webview 收不到/收得慢 → 所有 cliclick/keystroke 都赶在响应回来前发出,
+  全部卡在"对方还没响应"的状态。
+
+  代码层面任何修法都救不了 — 因为根因不在代码,在网络拓扑。
+
+★ 当下解决:
+  - 临时: 关掉 Shadowrocket,头条流量直连(实证 18:15 已验证有效)
+  - 长期: Shadowrocket 加规则集,让 *.toutiao.com / *.bytedance.com / czgts.cn 直连(DIRECT)
+         不影响其他需要代理的流量
+
+★ 沉淀(给所有 agent):
+  以后任何机器出现"罐头响应慢/cliclick 点击不到/对话框迟迟不出"的症状,
+  **第一反应先查代理**:
+    - scutil --proxy 看系统代理
+    - ps aux | grep -iE "shadowrocket|clash|v2ray|surge" 看代理进程
+    - route get mp.toutiao.com 看头条流量是否走 utun*
+    - 解析的 IP 是 198.18.x.x / 240.0.0.0/4 / 等私有段 = 被代理劫持
+  确认是代理问题就让头条流量直连,不要再去改代码层细节(白浪费时间)。
+
+谁记的: 阿良 — 缺哥实战印证 18:15 确认
+状态: 已修(关代理) — 长期建议加直连规则
+
+
 --- [2026-04-30 17:30] [air@妈家网络] [微头条] [直接赋值 sheet 1 of sheet 1 拿不到 — 网络慢拖累渲染时序] ---
 现象: Air 04-30 17:24 启动微头条(149账号三批全选成功 ✓),第一篇起每篇都触发
       "直接赋值失败（ERR:System Events 不能获得 sheet 1 of sheet 1 of window 1）"
