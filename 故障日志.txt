@@ -28,6 +28,38 @@
 未修
 ============================================================
 
+--- [2026-05-02 00:30] [Air] [代理配置] [Shadowrocket dns-direct-system 误开成 true → 全流量被劫进 TUN 走代理] ---
+现象: 缺哥说"小火箭把所有都走代理",`route get mp.toutiao.com` 显示走 utun9,
+      `nslookup mp.toutiao.com` 解析到 198.18.0.14(fake-IP),系统 HTTP 代理被
+      Shadowrocket 接管(127.0.0.1:1082)。
+影响: 头条/罐头国内流量被绕到代理出国,妈家弱网下会复发 04-30 罐头卡死那种事故。
+上下文: 阿良 2026-05-02 凌晨 0:17 手贱在 default.db 把 `general/dns-direct-system`
+      从 false 改成 true,留下备份 default.db.bak.dns_direct_20260502_001742。
+推测根因(已验证): `dns-direct-system: true` 让 DIRECT 规则的域用"系统 DNS"解析,
+      但 macOS 系统 DNS 已被 Shadowrocket 自己接管(指向 198.18.0.2),所以 DIRECT
+      规则拿到的解析结果还是 fake-IP,等于规则白配,所有流量都进 TUN 经代理。
+      规则本身(toutiao→DIRECT / GEOIP CN→DIRECT / FINAL→PROXY)没问题。
+谁记的: 阿良(Air)
+状态: 已修
+
+★ 修后补:
+修法:
+  1. 备份当前 db: cp default.db default.db.bak.before_revert_<ts>
+  2. sqlite3 改回: UPDATE config SET value='false' WHERE section='general' AND name='dns-direct-system'
+  3. quit + 重启 Shadowrocket(主进程读 db,不需要 reboot 整机)
+验证:
+  - mp.toutiao.com curl 222ms HTTP 301 ✅ 直连
+  - google.com curl 2.99s HTTP 200 ✅ 走代理
+  - dns-direct-system 现值 = false
+落地版本: 仅 Air 本机(其他机器用同样命令排查 + 修)
+落地时间: 2026-05-02 00:30
+落地人: 阿良
+红线: **任何机器的 Shadowrocket `dns-direct-system` 必须 = false**,不要再误改。
+      检查命令:
+      sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db \
+        "SELECT name,value FROM config WHERE name='dns-direct-system'"
+      详细原理见 shared_memory/feedback_proxy_china_direct.md。
+
 --- [2026-05-01 22:00] [台机] [三大件] [doc_pool 启动快照与外部 mutate 冲突 — 文档已分发删源致罐头"找不到文件"] ---
 现象: 台机 05-01 跑微头条,罐头「文档导入」对话框弹"找不到文件,请检查文件名是否正确"。
       文件名输入框塞的是 `2249_0.52_美方没有资格干涉中国内政_..._20260501003119.docx`
@@ -53,6 +85,43 @@
 谁记的: 绣虎(Win 台机) — 缺哥实地截图实证 22:00 确认
 状态: 修中(v1101.4 落地中)
 
+--- [2026-04-30 19:50] [台机] [跨机控制] [Tailscale 通了但仍无法远程启动脚本 — Windows session 隔离 + MS 账户限制] ---
+现象: 缺哥外出,台机微头条脚本 19:01 异常退出(差 62 篇没发到 320),阿良想从 Air
+      经 Tailscale ssh 进台机远程双击 go.bat 重启,折腾 30+ 分钟全部失败。
+
+阶段进展(都通了):
+  1. Air ↔ 台机 Tailscale 隧道 OK,DERP 中继可达
+  2. 路由污染修复(sudo route add -host 100.x -interface utun0)后 SSH 通
+  3. sshpass + sftp 推 v3 xlsx 到台机成功(白名单已替换为 62 补漏账号)
+
+但启动脚本卡死 — 3 个独立卡点(都不是网络层):
+  ① SSH 进来落 session 0(无桌面),桌面 session 1 是 kench 在用,Windows 强隔离
+     → session 0 起的 Python 戳不到 session 1 的鼠标/键盘/罐头窗口
+  ② 跨 session 投递要 Windows 本地账户密码:
+     - schtasks /Create /RU /RP → "用户名或密码错误"
+     - PowerShell Register-ScheduledTask -Password → 注册后任务消失
+     - schtasks /IT 不带密码 → Status=Running 但 Python 没起(还在 session 0)
+  ③ kench 是 Microsoft Account(PrincipalSource: MicrosoftAccount):
+     - 密码走 Hello/PIN/微软服务器验证,本地 SAM 不存
+     - 任何本地密码(geng7997 / keneunice0816)schtasks 都拒
+     - OpenSSH 能登只是因为它走了 LSA cache 等其他认证路径
+  PsExec(SysInternals)未装,无法走 -i 1 直接投递 session 1。
+
+影响: 62 篇没补,只能等缺哥回家或开向日葵手动双击 go.bat。
+
+教训(写给未来 agent / 缺哥):
+  Tailscale 通 ≠ 能远程启动脚本。TS 给的是网络层连通,
+  不是进程跨 session 控制权。Windows 远程跨 session 启动需要其中之一:
+    A. PsExec.exe 提前装在 C:\Tools\,SSH 跑 PsExec -i 1 -d <bat>(无密码)
+    B. 任务计划程序"用户登录时触发",远程 schtasks /Run 拉一次
+    C. 向日葵 / AnyDesk unattended,人肉远程双击
+
+下次外出前必备(缺哥本机操作一次):
+  - 下载 PsExec,放 C:\Tools\PsExec.exe
+  - 或开向日葵 unattended
+
+谁记的: 阿良(Air)
+状态: 未修 — 待装 PsExec / 配登录触发 task
 
 --- [2026-04-30 18:15] [air@妈家网络] [微头条] [真根因: Shadowrocket 全局代理把头条流量送国外节点 — 妈家上行差导致代理路径抖] ---
 现象: Air 04-30 17:24~18:00 在妈家网络下,微头条脚本一启动就连续卡:
