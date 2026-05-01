@@ -900,3 +900,58 @@ Win 台机豁免: Win Tailscale 用 per-host /32 路由(每 peer 单独一条挂
 状态: 已解释 — 一次性事件,非脚本 bug,不入待修
 
 ============================================================
+
+
+--- [2026-05-01 17:00] [air→全队 4 Mac] [Shadowrocket 把头条流量送国外节点 → 单篇 92.8s vs 49s 直连(2.5x 拖累)] ---
+现象(air 实证, 2026-05-01):
+  - 04-30 极稳基线: 36.3s/篇 (Q6 移动 WiFi)
+  - 05-01 开 Shadowrocket: 92.8s/篇 (300 篇全程)
+  - 05-01 关 Shadowrocket: 49s/篇 (接力 150 篇起手实测)
+  - 关代理前出口: 67.230.181.90 (Sharktech 美国 IDC)
+  - 关代理后出口: 223.74.241.166 (中国广东揭阳移动)
+  - 缺哥手感原话: "开小火箭很慢,直连很快"
+
+影响:
+  - air 一轮 150 篇 多耗 1.8h
+  - mini / neo / neo2 同样开 Shadowrocket,推断被同因素拖累(待发完后实证)
+  - 5-1 全队微头条通宵到 5-2 凌晨,根因里小火箭占大头
+
+真根因(实证 + 推断):
+  Shadowrocket 默认规则把 toutiao.com / mp.toutiao.com 等头条系流量送到代理(国外节点)
+  → 头条 backend 看到 air 是境外 IP
+  → 风控/反爬限速触发(对话框加载延迟,cliclick 兜底反复重试)
+  → 操作部分耗时翻倍(~18s → ~75s),篇间等待 18s 不变
+  → 同时大量 X 异常 / 对话框完全卡死(air log 实证 735 次)
+
+修法(目标: 开小火箭 + 头条系直连 = 双赢):
+  全局规则参考: shared_memory/feedback_proxy_china_direct.md (国内直连 + 海外走代理)
+  
+  Shadowrocket 加白名单 (Type=DOMAIN-SUFFIX, Action=DIRECT):
+    toutiao.com
+    bytedance.com
+    snssdk.com
+    pstatp.com
+    ixigua.com
+    feiliao.com
+    volcvideo.com
+    bytecdn.cn
+  
+  执行步骤(每机 5min GUI 操作):
+    1. Shadowrocket 主界面 → 配置 → 规则 → 添加
+    2. 类型 DOMAIN-SUFFIX,内容如上 8 条逐个加,策略 DIRECT
+    3. 保存 → 重启代理
+  
+  验证(每机各跑一次):
+    a. curl https://myip.ipip.net 出口应是国内 ISP IP
+    b. curl mp.toutiao.com TTFB ≤ 0.5s
+    c. 单篇耗时从 92s 降到 ≤ 49s(理想 36s,差距是 Q6 移动稳态延迟)
+
+执行时机(避运营商切换风控):
+  air: 已关 Shadowrocket 应急(05-01 16:46);跑完接力 150 篇后再加白名单复开,验证开代理时仍 49s/篇
+  mini / neo / neo2: 不停当前发文,等 5-2 凌晨发完通宵再改;出口运营商突变会触发头条风控
+  Win 台机: 不在 Shadowrocket 范围(用 v2rayN);ProxyOverride 已排字节系,本机不受影响
+
+谁记的: 绣虎(Win 台机)
+状态: ⚠️ 待修 — 4 Mac 各机加白名单;air 应急关代理(出口=国内移动)能跑,但 GitHub/Anthropic 等海外服务暂断,加白名单后可恢复
+
+============================================================
