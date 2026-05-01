@@ -2,42 +2,49 @@
 自动发布 — 版本说明
 ============================================================
 
-【云仓库同步状态(2026-04-30 13:50,记录人:绣虎/Win 台机)】
+【云仓库同步状态(2026-05-01 22:?? 刷新,记录人:绣虎/Win 台机)】
   GitHub: https://github.com/kenchoi88/toutiao-auto-publish
   分支:   main
-  最新 commit: ccf876e(归档:本会话之前积压杂项 + 工具脚本上云)
-  本地 = 云端 ✓ 完全同步,git status 工作区干净,无未提交改动
+  当前主线版本: v1101.4(2026-05-01 22 落地,5 机全队 patch 完毕)
+  本地 = 云端 ✓ 完全同步
 
-  本会话(04-30 凌晨~下午)累积上云的 commits(由旧到新):
-    8ef4926  v1101.3 hotfix#2: Mac 端 Finder 兜底抢前台守护脚本(早些)
-    15d50f4  故障日志:mini 文章定时 gtg_timer.py 缺「本轮已发」中断恢复机制
-    fe960f3  仓库 v1101.3/mac 三件同步真版(neo2 04-29 21:37 patch 同款)
-    8598c72  故障日志:04-30 凌晨会话全队 v1101.3 对齐 + 推送目标修正
-    7966730  故障日志:frontmost trace 诊断脚本(4 Mac 装机)+ keep_canned_top 抢前台条目
-    956fc13  故障日志:mini vs 台机 发文耗时归因纠正(Mac 平台 91% / 网络 9%)
-    f62d97c  故障日志:耗时归因补充验证 + neo2 文章定时异常诊断
-    3d8cd18  故障日志 neo2 诊断纠正:物理收 Q6 信号弱才是主因,cliclick 边缘失准不是主问题
-    89b4a40  故障日志:v1101.x 待修缺陷攒清单(5 条)— 攒齐出大版本统一改
-    94c013e  基线快照:5 机网络/耗时对比(2026-04-30,华为路由到货前)
-    ccf876e  归档:本会话之前积压杂项 + 工具脚本上云
+  本会话(05-01 v1101.4 改版)上云的 commits(由旧到新):
+    52f037e  MCN数据: 加 fill_30.py — 用子目录手工下载 xlsx 填 30号列+4月30号行
+    7f86642  shared(feedback): 改版 7 步工作流 — 缺哥 2026-05-01 拍板
+    d1ef089  v1101.4 文档先落: 故障说明 + 版本说明
+    0fa3c51  v1101.4 Step 5/7: Win 三大件 patch 同步仓库
+    8222622  shared(feedback): 改版 7 步工作流补 — 每步开始前等缺哥确认才动
+    18d286e  shared(reference): 4 Mac 真版位置 + Mac patch 时机两条规则
+
+  v1101.4 5 机全队落地证据(2026-05-01 22 实证):
+    Win 台机    微头条 batch=5 | 文章 batch=5 | 文章定时 timer=2 + batch=5 标记
+    air         微头条 batch=5 | 文章 batch=5 | 文章定时 timer=6 (Mac 自包含 Stage2)
+    neo         微头条 batch=5 | 文章 batch=5 | 文章定时 timer=6
+    neo2        微头条 batch=5 | 文章 batch=5 | 文章定时 timer=6
+    mini        微头条 batch=5 | 文章 batch=5 | 文章定时 timer=6
+    所有件 .bak_pre_v1101.4_<TS> 备份齐, py_compile 全通
+
+  Win/Mac 文章定时件标记数差异说明:
+    - Win timer.py 内 import batch.py 的 run_death_grip → Stage 2 跑 batch.py 那 5 个标记 +
+      timer 自身只补 _pop_doc + Stage 1 调用 = 2 个 v1101.4 标记
+    - Mac timer.py 自包含 run_death_grip_timer → 全部在 timer.py 一件里:
+      _pop_doc + _pick_doc + _resync_pool + Stage 1 调用 + Stage 2 重扫 + Stage 2 调用 = 6 标记
 
   内容覆盖(任何机 `git pull` 即拉到完整快照):
-    ✓ v1101.3 全队三大件代码(自动发布/{微头条,文章,文章定时}自动发布101.3版/{mac,win}/)
-    ✓ 故障日志.txt(完整,含 5 条待修缺陷 + 耗时/网络归因 + neo2 异常诊断 + frontmost trace)
-    ✓ 网络对比基线_2026-04-30.md(仓库根,5 机网络耗时基线 + 明日华为路由对比方法)
-    ✓ 工具/(frontmost_trace.sh + cdp_probe.py + cdp_probe_wz.py + neo_wtt_live.py + neo_wz_live.py + keep_canned_top.sh)
-    ✓ shared_memory/(各 feedback/project 文档,跨机 Claude 共享 memory 副本)
-    ✓ 自动发布/(v1101.3 主线 + v1101.2/v1101.1 历史)
-    ✓ 各机器子目录(air/ neo/ neo2/ mini/ win台机/)的脚本快照
+    ✓ v1101.4 主线代码(自动发布/{微头条,文章,文章定时}自动发布101.4版/{win,mac}/ + README)
+    ✓ v1101.3 历史保留(自动发布/{微头条,文章,文章定时}自动发布101.3版/{win,mac}/)
+    ✓ 故障日志.txt(完整,含 v1101.4 故障说明 + v1101.x 待修缺陷攒清单)
+    ✓ 版本说明.txt(本文,v1101 ~ v1101.4 全段 + 待并入 v1102)
+    ✓ shared_memory/(含改版 7 步工作流 + 4 Mac 真版位置 等新规则)
 
   下次再扯"全推完没?同步了没?"时:
     - `git fetch origin && git rev-parse main origin/main`
     - 两个 hash 同 = 完全同步 ✓
     - 不同 = 哪边落后,先 pull/push 对齐再讨论
     - 不要靠"我推过了" / "应该是同步的" 这种嘴皮证据
+    - 跨机版本验证另看: .bak_pre_v110X.Y_<TS> + grep -c v110X.Y(实证 patch 落地)
 
-  说明: 各机本地仓库废弃方向(缺哥 04-30 决策,待规划)→ 以后所有机直接 git pull 拉云,
-        云端 = 唯一真版,本地副本不再当 source of truth。
+  改版工作流(2026-05-01 起):shared_memory/feedback_改版工作流.md(7 步顺序卡死,每步等缺哥确认)
 
 ============================================================
 
