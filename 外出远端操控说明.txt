@@ -1,0 +1,151 @@
+外出远程操控台机 · 标准操作手册
+================================
+版本: 2026-05-01 · 缺哥 / 绣虎(Win 台机)整理
+适用: 缺哥外出带任何一台 Mac(air/neo/neo2/mini),需要远程看/停/重启台机的发文进程
+真实事故催生(2026-04-30 下午 阿良 RDP 抢会话 → 台机微头条 1h12min 全损,128 篇 1459 报错)
+
+
+【一句话总结】
+================================
+外出操控台机,只走 Tailscale + SSH(端口 2222),绝对不要用 RDP/Microsoft Remote Desktop/向日葵/Todesk
+等任何"图形会话"协议。RDP 一接入就抢台机本地交互桌面,本地 GTG 进程立刻失去 WinSta0\Default,
+SetCursorPos 报 1459 整批挂死,而远端却没真握上 → 双方都死。SSH 是无头通道,完全不碰桌面,
+台机本地该跑还能跑,远端也能控制,这是唯一正确路径。
+
+
+【必要参数】
+================================
+台机主机名      : ken-choi
+台机 Tailscale  : 100.86.79.39
+台机 SSH 端口   : 2222          ← 注意!不是默认 22,默认 22 不监听,直连必 connection refused
+台机用户名      : kench
+台机统一密码    : (5 机共用,见 shared_memory/reference_统一密码.md;memory 里有,别在文档明文)
+
+air  Tailscale  : 100.67.252.1   (用户名 kenair)
+neo  Tailscale  : 100.68.57.96   (用户名 kenchoios)
+neo2 Tailscale  : 100.96.153.17  (用户名 kenchoineo2)
+mini Tailscale  : 100.70.22.7    (用户名 kenchoimini)
+
+Tailnet         : kenchoi315@gmail.com
+跨机直连段      : 100.64.0.0/10  (CGNAT,Shadowrocket 必须放行直连)
+
+
+【为什么家里移动 ↔ 电信能通,外面也一样能通】
+================================
+家里 4 Mac 走 Q6 移动 WiFi、台机走电信网线,底层是两条独立 ISP,IP 互不可见。
+真正打通的是 Tailscale tailnet——每台机上线就向 Tailscale 控制平面注册,
+节点间用 100.x 地址通信,控制平面帮做 NAT 穿透(优先 UDP 直连,穿不透走 DERP 中继)。
+所以外面任何网络(4G/咖啡馆 WiFi/朋友家)都不重要,只要带出去的 Mac 能联网、Tailscale 在线,
+100.x 就和台机互通,跟在家完全一样。
+
+
+【外出连台机 · 标准命令】
+================================
+在带出去的 Mac 终端跑(以 air 为例,其他机一样):
+
+    ssh -p 2222 kench@100.86.79.39
+
+输入统一密码即可。
+
+——一劳永逸版:把下面写到带出去的 Mac 的 ~/.ssh/config(没有就新建),以后 `ssh taiji` 直接连——
+
+    Host taiji
+      HostName 100.86.79.39
+      User kench
+      Port 2222
+      ServerAliveInterval 30
+      ServerAliveCountMax 4
+
+之后只要 `ssh taiji` 即可。
+
+
+【外出常用操作命令(SSH 进台机后)】
+================================
+进台机后默认是 PowerShell,以下命令都在台机本地执行。
+
+# 1. 看 GTG 进程是否还在
+tasklist | findstr python
+
+# 2. 看微头条最近日志(看完按 q 退出)
+Get-Content "C:\Users\kench\Desktop\台机专用自动发布\微头条自动发布\gtg_log.txt" -Tail 100
+
+# 3. 看今日运行报告(替换 20260501 为当天)
+Get-Content "C:\Users\kench\Desktop\台机专用自动发布\微头条自动发布\运行报告\20260501\运行日志.txt" -Tail 100
+
+# 4. 紧急停所有 GTG(连同所有 python 进程)
+taskkill /f /im python.exe
+
+# 5. 重启微头条发文(后台跑,关闭 SSH 不会停)
+cd "C:\Users\kench\Desktop\台机专用自动发布\微头条自动发布"
+Start-Process cmd -ArgumentList "/c go.bat" -WindowStyle Normal
+
+# 6. 重启文章发文 / 定时文章发文 同理,改路径即可
+#    C:\Users\kench\Desktop\台机专用自动发布\文章自动发布
+#    C:\Users\kench\Desktop\台机专用自动发布\文章定时自动发布
+
+# 7. 看 v2rayN 是否还在(Win 台机的代理通道)
+tasklist | findstr -i "v2rayN xray"
+
+
+【雷区(踩中=台机停摆,缺哥手动救)】
+================================
+1. 不要用 RDP / 远程桌面连接 / mstsc / Microsoft Remote Desktop / Parallels Client
+   → Win11 单交互会话,RDP 一握手就抢 console session
+   → 台机本地 GTG 立刻 SetCursorPos 1459,128 次空跑(2026-04-30 实战案例)
+   → 阿良端如果握手失败,台机本地也回不来,要缺哥肉身去解锁
+
+2. 不要用 `tailscale ssh kench@taiji` wrapper 形式
+   → tailnet 当前 RunSSH=false,wrapper 不可用
+   → wrapper 还会反查 hostname 被 Shadowrocket fake-DNS 拦成 198.18.x
+   → 直接 `ssh -p 2222 kench@100.86.79.39` 走 100.x 直连最稳
+
+3. 不要锁台机屏 / 切用户 / 让台机睡眠
+   → 一锁屏台机本地 GTG 同样 1459(和 RDP 抢会话同因)
+   → 出门前确认台机电源管理:从不睡眠,显示器可关但系统不睡
+
+4. 不要在 SSH 里用 `Read-Host` / 弹 UAC / 任何交互 GUI
+   → SSH 是非交互会话,UAC 弹窗会卡死
+   → 改 HKCU 不要 UAC(memory 已有 feedback_hkcu_no_admin.md)
+
+
+【故障排查 5 步法】
+================================
+症状: 阿良说"无法 SSH"
+
+第 1 步 · 验 Tailscale 通路
+    在 Mac 端: tailscale ping 100.86.79.39
+    通  → 第 2 步
+    不通 → 检查 Mac 端 Tailscale 是否登录,Shadowrocket 是否放行 100.64.0.0/10
+
+第 2 步 · 验台机 SSH 服务
+    在台机端(SSH 不通时让缺哥肉身上去查):
+        Get-Service sshd      → Status 应是 Running
+        Get-NetTCPConnection -State Listen | Where-Object {$_.LocalPort -eq 2222}
+                              → 应有 0.0.0.0:2222 在 Listen
+    没在 Listen → Restart-Service sshd
+
+第 3 步 · 验端口
+    Mac 端: nc -zv 100.86.79.39 2222
+    通  → 第 4 步
+    不通 → 防火墙问题,台机端: Get-NetFirewallRule -DisplayName *SSH* (应都 Enabled True)
+
+第 4 步 · 验认证
+    ssh -p 2222 -v kench@100.86.79.39
+    看 -v 详细输出,常见:
+      "Permission denied"     → 密码错(注意 Win 密码不是 sudo 密码,虽然现在共用)
+      "Host key verification" → 旧 known_hosts 残留,删掉对应行重连
+
+第 5 步 · 兜底:让缺哥(或现场任一人)肉身上台机
+    任何一步卡住,直接打电话给在家的人重启 sshd 服务即可:
+        Restart-Service sshd
+    (这是为什么不要用 RDP 抢会话——会让肉身这条路也变难)
+
+
+【更新历史】
+================================
+2026-05-01 · 绣虎 · 初版,从 04-30 阿良 RDP 抢会话事故沉淀
+            · 实证: sshd Running、防火墙 Allow、Listen 仅 2222(非 22)
+            · 根因: 阿良默认走 22,被 connection refused 误判为 SSH 不通
+
+================================
+EOF
