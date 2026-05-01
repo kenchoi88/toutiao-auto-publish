@@ -307,6 +307,67 @@ v1101.3 hotfix#2 — 2026-04-29 21:45 (Mac 端 Finder 兜底抢前台守护)
   Mac 端通用,Win 不需要(win32api 不抢前台)。
 
 ============================================================
+v1101.5 hotfix — 2026-05-02(gtg_batch 按 xlsx 白名单顺序跑账号 + catchup.py 中断恢复)
+============================================================
+
+【背景故障】
+  2026-05-02 04:09 电信断网,4 Mac Stage 1 全队中断,误判硬终止 394 账号(详见
+  故障日志.txt「2026-05-02 04:09 全队 文章定时件」条)。手动补漏耗时 30+ 分钟。
+  缺哥拍板沉淀成 一键 catchup.py 工具 + gtg_batch 配套 hotfix。
+
+【修的 BUG】
+  原 gtg_batch.py 按罐头侧边栏顺序跑账号,xlsx 白名单顺序无效。
+  中断恢复时无法按"断点账号为首,环形重排"启动续发 — 只能从侧边栏头部跑,
+  漏发账号不能优先排在前。
+
+【修法 — gtg_batch.py 一段 patch】
+  在 _wl_map 加载后(line ~2333),按白名单 keys 顺序重排 accounts:
+
+  ordered = []
+  for inc in _wl_map.keys():
+      for a in accounts:
+          if (inc in a or a in inc) and a not in ordered:
+              ordered.append(a)
+              break
+  for a in accounts:
+      if a not in ordered:
+          ordered.append(a)
+  accounts = ordered
+  log(f"  ★ 已按白名单顺序重排,首账号: {accounts[0]}")
+
+  patch 标记: # [v1101.5-hotfix]
+
+【配套工具:catchup.py(规范在 shared_memory/project_catchup_中断恢复.md)】
+  - 三大件中断后 cd 件目录 → python3 catchup.py → 双击 go.command,3 步搞定
+  - 自动从「待补漏」sheet 或 log 算 quota - 已成功 = 漏数
+  - 环形重排:断点账号 → 末位 → 绕回开头
+  - 写白名单 + 备份
+
+【落地范围】
+  ▸ Win 台机:待落 ☐
+  ▸ mini ✓ (Mac 桌面 ~/Desktop/文章自动发布/gtg_batch.py 已 patch v1101.5-hotfix,
+            备份 .bak_pre_xlsx_order_20260502_072517)
+  ▸ air / neo / neo2:待 patch ☐
+  ▸ catchup.py 工具:待写 + 部署 5 机 ☐
+
+【架构红线(本版坚决不动)】
+  - Stage 1 / Stage 2 两阶段架构
+  - 篇间等待 8-20s sleep
+  - cliclick / win32api 真鼠标点击
+  - move_to_sent 语义
+  - quota 机制本身(每账号配额)
+
+【Why】
+  对应「漏 N 补 N」补漏规则 + 应对网络中断这种系统级故障。
+  catchup.py 用「待补漏」sheet 这一权威数据源,不靠手算。
+  v1101.5-hotfix 让 catchup.py 排好的 xlsx 顺序真正生效。
+
+【关联文档】
+  - shared_memory/project_catchup_中断恢复.md — catchup.py 规范
+  - shared_memory/feedback_改版工作流.md — 改版 7 步
+  - 故障日志.txt 「2026-05-02 04:09」条 — 触发本 hotfix 的事件
+
+============================================================
 v1101.4 — 2026-05-01(doc_pool 实时校验 + 重扫,救"分发完源必删"导致罐头找不到文件)
 ============================================================
 
