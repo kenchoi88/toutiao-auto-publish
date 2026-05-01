@@ -122,6 +122,9 @@
 
 谁记的: 阿良(Air)
 状态: 未修 — 待装 PsExec / 配登录触发 task
+教训沉淀: shared_memory/feedback_remote_start_windows_taiji.md
+          (下次外出前 3 选 1 装 PsExec / 配登录触发 task / 开向日葵 unattended;
+           agent 接"远程启动台机脚本"任务先查这三件,没有就报警放弃别折腾)
 
 --- [2026-04-30 18:15] [air@妈家网络] [微头条] [真根因: Shadowrocket 全局代理把头条流量送国外节点 — 妈家上行差导致代理路径抖] ---
 现象: Air 04-30 17:24~18:00 在妈家网络下,微头条脚本一启动就连续卡:
