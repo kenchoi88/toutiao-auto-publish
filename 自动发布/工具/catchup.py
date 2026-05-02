@@ -2,22 +2,24 @@
 # -*- coding: utf-8 -*-
 """
 catchup.py — 中断恢复一键工具(三大件通用)
-2026-05-02 沉淀于凌晨电信断网事件后,缺哥拍板。
+v1101.5 · 2026-05-02 · 全员独立脚本控制,主线零内部控制
 
 用法:
     cd ~/Desktop/<件>自动发布 && python3 catchup.py
 
-逻辑:
-    1. 自适应当前所在件类型(微头条/文章)
-    2. 找文章定时件「待补漏」sheet(权威数据源)
-    3. 从最近 log 抽断点账号(最后一篇 ✓ 定时发布成功 的下一个)
+逻辑(自适应件类型):
+    1. detect_kind() → 微头条 (QUOTA=5) / 文章 (QUOTA=3)
+    2. 数据源优先级:
+       优先 1: 文章定时件「待补漏」sheet(若存在 + 当前是文章件 → 文章定时件中断救场)
+       优先 2: 自己今日 log 反推(quota = QUOTA_TARGET - 已成功)
+    3. 找断点账号(自己 log 最后一篇成功的下一个)
     4. 环形重排:断点为首 → 末 → 绕回开头
-    5. 写本件「白名单」+ 备份原 xlsx
-    6. 报告:断点 / 待补总数 / 首位末位
+    5. 写本件「白名单」+ 备份
 
-部署位置:
-    - 5 机各自的 ~/Desktop/{微头条,文章}自动发布/catchup.py
-    - Win 台机:~/Desktop/台机专用自动发布/{微头条,文章}自动发布/catchup.py
+部署:
+    - 5 机 ~/Desktop/{微头条,文章}自动发布/catchup.py
+    - Win 台机 ~/Desktop/台机专用自动发布/{微头条,文章}自动发布/catchup.py
+    - 仓库主版: 自动发布/工具/catchup.py
 """
 import os, sys, glob, shutil, time, re
 from pathlib import Path
@@ -32,10 +34,11 @@ HOME = Path.home()
 
 
 def detect_kind():
+    """返回 (件名, QUOTA_TARGET)"""
     n = HERE.name
-    if "微头条" in n: return "微头条"
-    if "文章" in n:   return "文章"
-    print(f"✗ 未识别件类型 (HERE={HERE.name})"); sys.exit(1)
+    if "微头条" in n: return ("微头条", 5)
+    if "文章" in n:   return ("文章", 3)
+    print(f"✗ 未识别件类型: {n}"); sys.exit(1)
 
 
 def find_timer_dir():
@@ -45,7 +48,7 @@ def find_timer_dir():
         HOME / "Desktop/Mac文章定时自动发布",
         HOME / "code/头条自动发布/文章定时自动发布",
         HOME / "code/头条自动发布/Mac文章定时自动发布",
-        HOME / "Desktop/台机专用自动发布/文章定时自动发布",  # Win 台机
+        HOME / "Desktop/台机专用自动发布/文章定时自动发布",
     ]
     for d in cands:
         if d.exists() and (d / "账号配置.xlsx").exists():
@@ -54,6 +57,7 @@ def find_timer_dir():
 
 
 def read_待补漏(timer_dir):
+    """读 文章定时件 账号配置.xlsx「待补漏」sheet → [(账号, 漏数), ...]"""
     p = timer_dir / "账号配置.xlsx"
     try:
         wb = load_workbook(p, read_only=True, data_only=True)
@@ -78,37 +82,85 @@ def read_待补漏(timer_dir):
         return []
 
 
-def find_breakpoint(items, timer_dir):
-    """从 文章定时件 最新 log 找最后一篇 ✓ 定时发布成功 的账号 → 返回 它在 items 中的下一个 index"""
-    if not items or not timer_dir: return 0
-    log_root = timer_dir / "运行报告"
-    if not log_root.exists(): return 0
+def find_self_log():
+    """找当前件最新 log"""
+    log_root = HERE / "运行报告"
+    if not log_root.exists(): return None
     logs = sorted(log_root.glob("*/运行日志.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not logs: return 0
+    return logs[0] if logs else None
 
-    last_account = None
-    pat = re.compile(r"✓ 定时发布成功:\s*(.+)")
+
+def reverse_quota_from_log(log_file, accounts_known, quota_target):
+    """从自己 log 反推每号已发数 → quota = QUOTA_TARGET - 已发
+    返回 [(账号, 漏数), ...] 按 log 出现顺序(早到晚)"""
+    if not log_file or not log_file.exists():
+        return []
+    # 微头条/文章 gtg_batch log 格式: [HH:MM:SS] [剩余 N 篇] [大1/小1/A] 账号名 -> docx
+    # OK 行: "OK 发布成功" / "✓ 发文成功"
+    task_pat = re.compile(r"\[剩余\s*\d+\s*篇\]\s*\[\S+?\]\s*(?:\[补发\]\s*)?(\S+?)\s*->")
+    ok_pat = re.compile(r"OK 发布成功|✓ 发文成功|发布成功")
+
+    sent_count = {}
+    cur_acc = None
+    appear_order = []
     try:
-        with open(logs[0], encoding="utf-8") as f:
+        with open(log_file, encoding="utf-8") as f:
             for line in f:
-                m = pat.search(line)
+                m = task_pat.search(line)
                 if m:
-                    last_account = m.group(1).strip()
+                    cur_acc = m.group(1).strip()
+                    if cur_acc not in appear_order:
+                        appear_order.append(cur_acc)
+                    continue
+                if ok_pat.search(line) and cur_acc:
+                    sent_count[cur_acc] = sent_count.get(cur_acc, 0) + 1
+                    cur_acc = None
     except Exception as e:
         print(f"  ! 读 log 失败: {e}")
+        return []
+
+    items = []
+    # 按出现顺序排,每号 quota = max(0, target - sent)
+    for acc in appear_order:
+        q = max(0, quota_target - sent_count.get(acc, 0))
+        if q > 0:
+            items.append((acc, q))
+    return items, sent_count
+
+
+def find_breakpoint(items, log_file):
+    """从 log 找最后一篇 ✓ 成功的下一个 → items 中的 index"""
+    if not items or not log_file or not log_file.exists():
+        return 0
+    last_account = None
+    pat = re.compile(r"OK 发布成功|✓ 发文成功|✓ 定时发布成功")
+    task_pat = re.compile(r"\[剩余\s*\d+\s*篇\]\s*\[\S+?\]\s*(?:\[补发\]\s*)?(\S+?)\s*->")
+    cur_acc = None
+    try:
+        with open(log_file, encoding="utf-8") as f:
+            for line in f:
+                tm = task_pat.search(line)
+                if tm:
+                    cur_acc = tm.group(1).strip()
+                    continue
+                if pat.search(line):
+                    if cur_acc:
+                        last_account = cur_acc
+                    else:
+                        m = re.search(r"成功:\s*(\S+)", line)
+                        if m: last_account = m.group(1).strip()
+    except Exception:
         return 0
 
-    if not last_account:
-        return 0
+    if not last_account: return 0
     names = [n for n, _ in items]
     if last_account not in names:
-        # 最后成功账号已被清出待补漏(它本来就发完了)— 起点用 items 第一个
         return 0
     idx = names.index(last_account)
     return (idx + 1) % len(items)
 
 
-def write_whitelist(items, start_idx):
+def write_whitelist(items, start_idx, kind):
     p = HERE / "账号配置.xlsx"
     if not p.exists():
         print(f"✗ 当前件无 账号配置.xlsx: {p}"); sys.exit(1)
@@ -139,32 +191,54 @@ def write_whitelist(items, start_idx):
 
 
 def main():
-    kind = detect_kind()
-    print(f"=== catchup.py · 件: {kind}自动发布 ===")
+    kind, quota_target = detect_kind()
+    print(f"=== catchup.py · {kind}自动发布 (QUOTA={quota_target}) ===")
     print(f"    HERE: {HERE}\n")
 
-    timer_dir = find_timer_dir()
-    if not timer_dir:
-        print("✗ 找不到 文章定时件 目录(待补漏 数据源)")
-        print("  TODO: log fallback 模式未实现,人工写白名单")
-        sys.exit(1)
-    print(f"  文章定时件: {timer_dir}")
+    items = []
+    log_file_for_breakpoint = None
+    source = ""
 
-    items = read_待补漏(timer_dir)
+    # 数据源优先级 1: 文章定时件「待补漏」sheet (仅文章件适用)
+    if kind == "文章":
+        timer_dir = find_timer_dir()
+        if timer_dir:
+            待补漏_items = read_待补漏(timer_dir)
+            if 待补漏_items:
+                items = 待补漏_items
+                source = f"文章定时件「待补漏」({timer_dir})"
+                # 断点用 文章定时件 log
+                log_root = timer_dir / "运行报告"
+                logs = sorted(log_root.glob("*/运行日志.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+                log_file_for_breakpoint = logs[0] if logs else None
+                print(f"  ✓ 数据源: {source}")
+                print(f"     {len(items)} 账号 / {sum(m for _, m in items)} 篇待补")
+
+    # 数据源优先级 2: 自己今日 log 反推
     if not items:
-        print("  ✗ 「待补漏」sheet 为空 — 文章定时件还没跑过 / 已被清空")
-        print("    TODO: log fallback 算 quota - 已成功 (未实现)")
+        log_file_for_breakpoint = find_self_log()
+        if log_file_for_breakpoint:
+            result = reverse_quota_from_log(log_file_for_breakpoint, [], quota_target)
+            if isinstance(result, tuple):
+                items, sent_count = result
+                if items:
+                    source = f"自己今日 log 反推 ({log_file_for_breakpoint.parent.name})"
+                    print(f"  ✓ 数据源: {source}")
+                    print(f"     {len(items)} 账号 / {sum(m for _, m in items)} 篇待补 (已发{sum(sent_count.values())} 篇)")
+
+    if not items:
+        print("✗ 无数据 — 没有「待补漏」数据,自己 log 也没成功记录")
+        print("  人工写白名单或确认是否本日已跑过")
         sys.exit(1)
-    print(f"  从「待补漏」读到: {len(items)} 账号 / {sum(m for _,m in items)} 篇待补")
 
-    start_idx = find_breakpoint(items, timer_dir)
+    # 找断点
+    start_idx = find_breakpoint(items, log_file_for_breakpoint)
     if start_idx == 0:
-        print(f"  断点: items[0] (找不到日志最后成功账号 / 或它已发完)")
+        print(f"  断点: items[0] (无法定位 / 最后成功账号已发完)")
     else:
-        print(f"  断点: items[{start_idx}] = {items[start_idx][0]}")
-    print()
+        print(f"  断点: items[{start_idx}] = {items[start_idx][0]}\n")
 
-    write_whitelist(items, start_idx)
+    write_whitelist(items, start_idx, kind)
     print()
     print("下一步: 双击 go.command (或 go.bat) 启动跑")
 
