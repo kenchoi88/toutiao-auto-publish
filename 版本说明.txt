@@ -307,65 +307,69 @@ v1101.3 hotfix#2 — 2026-04-29 21:45 (Mac 端 Finder 兜底抢前台守护)
   Mac 端通用,Win 不需要(win32api 不抢前台)。
 
 ============================================================
-v1101.5 hotfix — 2026-05-02(gtg_batch 按 xlsx 白名单顺序跑账号 + catchup.py 中断恢复)
+v1101.4 续修 — 2026-05-02(全员独立脚本控制,主线零内部控制)
 ============================================================
+  主版本号不变(仍 v1101.4),记一笔小修。
 
-【背景故障】
-  2026-05-02 04:09 电信断网,4 Mac Stage 1 全队中断,误判硬终止 394 账号(详见
-  故障日志.txt「2026-05-02 04:09 全队 文章定时件」条)。手动补漏耗时 30+ 分钟。
-  缺哥拍板沉淀成 一键 catchup.py 工具 + gtg_batch 配套 hotfix。
+【背景】
+  2026-05-02 04:09 电信断网,4 Mac Stage 1 全队中断,误判硬终止 394 账号
+  (详见 故障日志.txt「2026-05-02 04:09」条)。
+  讨论"中断恢复"机制走过两条弯路,最终缺哥拍板:**主线脚本绝对 "死",
+  所有智能放独立脚本**。
 
-【修的 BUG】
-  原 gtg_batch.py 按罐头侧边栏顺序跑账号,xlsx 白名单顺序无效。
-  中断恢复时无法按"断点账号为首,环形重排"启动续发 — 只能从侧边栏头部跑,
-  漏发账号不能优先排在前。
+【职责绝对分清】
+  catchup.py(独立脚本,中断时用户主动跑):
+    - 读 log / 读「待补漏」sheet
+    - 算缺 N 补 N
+    - 写 xlsx「白名单」(账号 + quota)
 
-【修法 — gtg_batch.py 一段 patch】
-  在 _wl_map 加载后(line ~2333),按白名单 keys 顺序重排 accounts:
+  gtg_batch / gtg_timer(主线 5 机三大件):
+    - 只读 xlsx「白名单」(账号 + quota)
+    - 跑发文
+    - 退出时写「待补漏」sheet(给独立脚本读,不算内部控制)
+    - **不读 log / 不反推 / 不排序 / 不算 quota**
 
-  ordered = []
-  for inc in _wl_map.keys():
-      for a in accounts:
-          if (inc in a or a in inc) and a not in ordered:
-              ordered.append(a)
-              break
-  for a in accounts:
-      if a not in ordered:
-          ordered.append(a)
-  accounts = ordered
-  log(f"  ★ 已按白名单顺序重排,首账号: {accounts[0]}")
+【撤回(违反"主线零内部控制"的)】
+  - mini 微头条「2026-05-01 反推 log hack」 — gtg_batch 自己读 log 算 quota,撤
+  - mini + air 文章件「v1101.5 xlsx 顺序排序 patch」 — gtg_batch 改 accounts 顺序,撤
 
-  patch 标记: # [v1101.5-hotfix]
-
-【配套工具:catchup.py(规范在 shared_memory/project_catchup_中断恢复.md)】
-  - 三大件中断后 cd 件目录 → python3 catchup.py → 双击 go.command,3 步搞定
-  - 自动从「待补漏」sheet 或 log 算 quota - 已成功 = 漏数
-  - 环形重排:断点账号 → 末位 → 绕回开头
-  - 写白名单 + 备份
+【加(对齐"读 xlsx 跑发文"标准)】
+  - 4 Mac 微头条加 _read_whitelist_with_quota 函数(从 Win 台机抄)
+    Win 台机本来就有,4 Mac 历史漂移没加,现在补齐
+  - catchup.py 主版升级 — 支持三大件:
+    · 微头条/文章 → 读 件自己今日 log 反推已发 → 算 quota
+    · 文章定时 → 读 件「待补漏」sheet(脚本自己写的)
+    · 写 → 对应件 ~/Desktop/<件>/账号配置.xlsx「白名单」
 
 【落地范围】
-  ▸ Win 台机:待落 ☐
-  ▸ mini ✓ (Mac 桌面 ~/Desktop/文章自动发布/gtg_batch.py 已 patch v1101.5-hotfix,
-            备份 .bak_pre_xlsx_order_20260502_072517)
-  ▸ air / neo / neo2:待 patch ☐
-  ▸ catchup.py 工具:待写 + 部署 5 机 ☐
+  Win 台机:微头条 / 文章件 / 文章定时 全部本来就符合,不动 ✓
+  mini:撤微头条 hack + 撤文章件 v1101.5 patch + 加微头条 _read_whitelist_with_quota
+  air:撤文章件 v1101.5 patch + 加微头条 _read_whitelist_with_quota
+  neo:加微头条 _read_whitelist_with_quota
+  neo2:加微头条 _read_whitelist_with_quota
+  文章定时 gtg_timer.py:5 机都不动(本来就读 quota + 写「待补漏」,符合标准)
+  catchup.py:仓库主版升级 + 5 机三大件 × 9 处部署
 
 【架构红线(本版坚决不动)】
   - Stage 1 / Stage 2 两阶段架构
   - 篇间等待 8-20s sleep
   - cliclick / win32api 真鼠标点击
   - move_to_sent 语义
-  - quota 机制本身(每账号配额)
+  - 罐头侧边栏顺序跑账号(就是死的)
 
 【Why】
-  对应「漏 N 补 N」补漏规则 + 应对网络中断这种系统级故障。
-  catchup.py 用「待补漏」sheet 这一权威数据源,不靠手算。
-  v1101.5-hotfix 让 catchup.py 排好的 xlsx 顺序真正生效。
+  - 主线复杂 = 维护风险大,bug 难查;独立脚本可单独迭代
+  - 用户主动选续 vs 自动续 — 主动选更可控,默认 GO 干净跑
+  - 中断不是常态,不该让中断逻辑污染主线
+
+【用户操作】
+  - 正常发文:双击 GO(主线干净跑)
+  - 中断后想从断点续:cd 件目录 → python3 catchup.py → 双击 GO
 
 【关联文档】
   - shared_memory/project_catchup_中断恢复.md — catchup.py 规范
   - shared_memory/feedback_改版工作流.md — 改版 7 步
-  - 故障日志.txt 「2026-05-02 04:09」条 — 触发本 hotfix 的事件
+  - 故障日志.txt「2026-05-02 04:09」条 — 触发事件
 
 ============================================================
 v1101.4 — 2026-05-01(doc_pool 实时校验 + 重扫,救"分发完源必删"导致罐头找不到文件)
