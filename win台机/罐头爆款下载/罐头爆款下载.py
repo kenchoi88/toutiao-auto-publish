@@ -20,10 +20,10 @@ from datetime import datetime
 
 CDP = 'http://127.0.0.1:9223'
 
-# 用户半年来稳定使用的 20 个领域(2026-04-26 确认)
+# 用户实际下载领域(2026-05-02 删"法律"+加"综艺",仍 19 个)
 TARGET_DOMAINS = [
-    '国际', '职业职场', '军事', '教育', '科学科技',
-    '健康', '养老', '美食', '三农', '法律',
+    '国际', '职业职场', '军事', '教育',
+    '健康', '养老', '美食', '三农', '综艺',
     '育儿', '旅游', '音乐', '运动健身', '动物宠物',
     '房产', '科普', '游戏', '动漫', '家居家装',
 ]
@@ -187,6 +187,22 @@ def main():
     p = json.loads(pos)
     print(f'下载按钮坐标: ({p["x"]}, {p["y"]})')
 
+    # [DIAG] 确认选中元素 + 坐标点真元素 + viewport(2026-04-28 罐头 v1.7.11 升级后下载无效排查)
+    diag = js(f"""
+    (function(){{
+      var el = document.elementFromPoint({p['x']}, {p['y']});
+      var info = {{iw: window.innerWidth, ih: window.innerHeight, dpr: window.devicePixelRatio,
+                   sx: window.scrollX, sy: window.scrollY}};
+      if(el){{
+        info.fp_tag = el.tagName;
+        info.fp_text = (el.textContent || '').slice(0, 60);
+        info.fp_cls = String(el.className).slice(0, 80);
+      }}
+      return JSON.stringify(info);
+    }})()
+    """)
+    print(f'  [DIAG] {diag}')
+
     # 5. CDP 真实鼠标点击
     before = set(os.listdir(WATCH_DIR))   # 监听 Chromium 默认下载位置
     cdp('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': p['x'], 'y': p['y']})
@@ -194,6 +210,28 @@ def main():
     cdp('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': p['x'], 'y': p['y'], 'button': 'left', 'clickCount': 1})
     time.sleep(0.05)
     cdp('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': p['x'], 'y': p['y'], 'button': 'left', 'clickCount': 1})
+    print('已触发 CDP mouseEvent,等 1.5s...')
+    time.sleep(1.5)
+
+    # [v1101.x] .click() 兜底:罐头 v1.7.11 升级后 dispatchMouseEvent 可能不触发 React handler,补一次 element.click()
+    after_cdp = set(os.listdir(WATCH_DIR))
+    if after_cdp == before:
+        click_ret = js("""
+        (function(){
+          var all = document.querySelectorAll('*');
+          for(var i=0;i<all.length;i++){
+            if((all[i].textContent || '').trim() === '下载数据' && all[i].children.length === 0){
+              var r = all[i].getBoundingClientRect();
+              if(r.width > 0){
+                try { all[i].click(); return 'js_click_ok:'+all[i].tagName; }
+                catch(e){ return 'js_click_err:'+e.message; }
+              }
+            }
+          }
+          return 'no_target';
+        })()
+        """)
+        print(f'  [兜底] CDP 1.5s 无下载,补 .click() → {click_ret}')
     print('已触发下载,等文件落地...')
 
     # 5b. Win API 自动关闭"另存为"对话框(Chromium CDP 已接管下载,对话框是冗余的)
