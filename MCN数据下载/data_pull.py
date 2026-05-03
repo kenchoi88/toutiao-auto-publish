@@ -276,7 +276,7 @@ def append_to_xlsx(stat_date: date, xg_cookies, jj_cookies, today_mode=False):
                 c = ws.cell(row=row_idx, column=5, value=data['liuzhuan'])
                 c.alignment = CENTER; c.border = BORDER
                 c.number_format = '¥#,##0.00'
-                print(f"  [{sheet_name}] {lbl}: 发文{data['fawen']} 推荐{data['tj']} 阅读{data['yd']} 流转¥{data['liuzhuan']:.2f}")
+                print(f"  [{sheet_name}] {lbl}: 发文{data['fawen']} 推荐{data['tj']} 阅读{data['yd']} 流转元{data['liuzhuan']:.2f}")
                 d += timedelta(days=1)
             continue
 
