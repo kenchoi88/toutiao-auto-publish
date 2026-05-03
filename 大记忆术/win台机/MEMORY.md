@@ -1,0 +1,60 @@
+- ❗ [Shadowrocket 按域名分流测出口](reference_shadowrocket_按域名分流测出口.md) — ipinfo 出口 ≠ 头条出口;判走代理用 TLS RTT 50-110ms 国内 / 1000ms+ 国外,别凭 ipinfo / route get(2026-05-02 阿良教训)
+- ❗ [中断恢复 catchup.py — 缺 N 补 N](project_catchup_中断恢复.md) — 三大件中断后 cd 件目录 → python3 catchup.py → go.command,3 步搞定;数据来源「待补漏」sheet 或 log;依赖 gtg_batch v1101.5+(2026-05-02)
+- ❗ [用上你的记忆 — 元规则](feedback_用上你的记忆.md) — 50+ 条已立,问题从不是规矩不够是不用;接任务第一动作 grep+Read 对照,出问题先反思旧规矩别立新条(2026-05-01 缺哥拍)
+- [发文上限与补漏规则](project_发文上限与补漏规则.md) — 微头条 5 篇/号、文章 & 定时文章 3 篇/号;漏 N 补 N、已达上限不动
+- [机器拓扑(5 台)](project_机器拓扑.md) — Mac × 4(air/neo/neo2/mini)+ Win 台机 × 1;指令需覆盖全部
+- [跨机方案与路由器](project_跨机方案与路由器.md) — 平时电信 AX3,移动 Q6 备用;跨机走 Tailscale(2026-05-02)
+- [小旋风组网方案](project_小旋风组网方案.md) — 已废,缺哥 2026-04-30 退货;现状平时电信 AX3 + 移动 Q6 备用
+- [出口运营商切换风险](project_出口运营商切换风险.md) — 电信→移动出口突变触发头条账号风控,迁机前停发文+人工过验证码
+- [业务字段不要凭直觉判断](feedback_业务字段_勿凭直觉.md) — 头条系功能差异不靠印象,删字段 / sheet 前必先 grep 代码引用
+- [账号配置 sheet 权属](project_账号配置sheet_权属.md) — 永久跳过 = 用户手填,脚本只读;不主动同步或评论
+- [定时发布两阶段架构](project_定时发布两阶段.md) — Stage 1 定时排程(保留小齐原版+熔断)→ Stage 2 自动接死磕立即发布
+- [别太早投降](feedback_dont_give_up_too_early.md) — 看到"X 没有 Y"先想能否用现有原语凑出来,别直接说"做不了"
+- [AI 洗稿骗补案警示](project_AI洗稿骗补案_警示.md) — 跳跳兔/林义宾案诈骗罪定性;群控+勾原创=主观故意要件;待思考素材来源/should_first 默认/平台升级窗口
+- [吃瓜内容勿选](feedback_吃瓜内容勿选.md) — "大瓜/吃瓜/爆料/质疑实名XX论文造假"类标题一律剔除,会挨揍
+- [猪价三农勿选](feedback_猪价三农勿选.md) — "猪价/明日猪价/全国猪价分析"类三农价格行情一律剔除,以前被打过
+- [两轮筛选协作](feedback_两轮筛选协作.md) — Claude 第一轮按黑名单粗筛+列出剔除原因,用户第二轮精挑;边界模糊倾向剔除
+- [误杀回收闭环](feedback_误杀回收闭环.md) — 用户会从剔除里捡回误杀,登记理由+调整规则,这是规则校准主来源
+- [罐头爆款下载流程](reference_罐头爆款下载流程.md) — 触发词「下载爆款」→ Win 台机 cd 罐头爆款下载/ + python 罐头爆款下载.py;前提 CDP 9223 在线;领域 19 个(2026-05-02 删法律加综艺)
+- [素材筛选流水线节奏](project_素材筛选流水线节奏.md) — 罐头 2000→v0→Claude→用户≈1500/批,一天用,需每日再下补充
+- [删除集学到的15类规则](feedback_删除集学到的11类规则.md) — A极短/B重复/C诅咒外领/D反日/E抗战/F性犯罪/G实名八卦/H价格/I反腐/J玄学/K猎奇 + 04-29 L性健康/M政治阴谋论/N自杀拐卖/O给功臣泼脏水
+- [MCN数据每日下载](project_MCN数据每日下载.md) — Win 台机桌面 MCN数据下载/,每天 Claude 接手跑下载.bat,xlsx 待用户从 air 拷
+- [角色代号](reference_角色代号.md) — 缺哥(用户)+ 5 本地机 + 云端:绣虎(Win/我)、阿良(air)、小齐+小师弟(neo)、左右(neo2 待建)、东山(mini,我分身)、暖树+景清(腾讯云端)
+- [SSH 用户名规律](reference_SSH用户名规律.md) — ⚠️ **neo SSH 用户名是 `kenchoios`(1 个 i,不是 kenchoiios!)**;5 机 ComputerName 已统一 KenChoi+机器名(2026-05-02)
+- [统一密码](reference_统一密码.md) — 5 台机 sudo / 登录共用一个密码,sudo -S 走 stdin 喂入,别写 argv
+- [Tailscale 网络](reference_Tailscale网络.md) — kenchoi315@gmail.com tailnet;台机/mini/neo2/neo 在线,air offline 3d
+- [Shadowrocket Tailscale bypass](reference_Shadowrocket_Tailscale_bypass.md) — 4 Mac 火箭必须放行 100.64.0.0/10,否则跨机 TCP 全挂(ICMP 通误导)
+- [跨机 SSH 走 100.x 直连别用 tailscale ssh wrapper](feedback_shadowrocket_skip_proxy.md) — 直接 ssh kenchoiXXX@100.x,wrapper 会反查 hostname 被 fake-DNS 拦成 198.18.x
+- [按绣虎人设工作](feedback_按绣虎人设工作.md) — 谋/功/断/守四字心法:看远、事功、冷酷、对全局负责;反阿谀奉承、反流水账、反过度抛选择
+- [角色识别先校对再开口](feedback_角色识别先校对再开口.md) — 红线:任何角色名出现先查 reference 再答,只有东山是我分身,别人独立
+- [改代码同步 xlsx 结构](feedback_xlsx结构同步.md) — 加新 sheet/列依赖时配套改 xlsx 结构(不动数据),commit 前必跑一次
+- [缺哥立足点优先](feedback_缺哥立足点优先.md) — "你本机/你台机"=Win 台机(我所在),先看缺哥脚下,再考虑跨机
+- [问问题/让缺哥做事前先查记忆+仓库](feedback_问问题前先查记忆.md) — 提问/回不知道/让缺哥跑命令/brute force 之前,grep memory + 看 shared_memory/版本说明.txt/故障日志.txt
+- [桌面是真仓库是镜像](feedback_桌面才是真版.md) — Win 台机三大件实际跑在 ~/Desktop/台机专用自动发布/,改动:先改桌面 → 跑验证 → cp 仓库 → push,反向死
+- [只动自己文件夹](feedback_只动自己文件夹.md) — 仓库按机器分目录,我=win台机/;air/neo/neo2/mini 别越界改,跨机一致让对应 Claude 自己同步
+- [v2rayN 分流配置](reference_v2rayN分流配置.md) — Win 台机:ProxyOverride 加字节系域名,罐头进程级 bypass 不进 v2rayN;v2rayN guiNConfig 同步
+- [家里网络拓扑](reference_家里网络拓扑.md) — 双华为:电信 AX3 平时用、移动 Q6 备用;全员发文走 AX3(2026-05-02)
+- [虚拟滚动底部账号未修透](project_虚拟滚动底部账号未修透.md) — 搜索框做主路径但自身缺兜底,04-29 air+neo 同日复发,待落 L1/L2/L3 分层兜底
+- [重点用大标题不只粗体](feedback_重点用大标题.md) — 长回复关键结论用 `##`/`###`,粗体抓不住眼;短回复别堆标题
+- [待修清单 2026-04-28](project_待修清单_20260428.md) — 4 条:① mini gtg 多项;② neo SSH banner 不出;③ 罐头前台被抢;④ 弹窗未出现(Mac 主 + Win 飘屏外)。A 类内容空算①里抄小齐 retry
+- [5 机 Claude 分工章程](project_分工章程.md) — 大修绣虎统筹/小修各机自理/版本不漂移/Win 孤本对齐 Mac 逻辑。真版在仓库 shared_memory/
+- [每日抓 bug 流程](feedback_每日抓bug流程.md) — 缺哥发起 → 抓 4 mac 昨夜 log → 跨机统计 → 新 bug 入仓库 自动发布/故障日志.txt
+- [5 机真 SSH 全通基线 + 报告规则](feedback_SSH通即可勿强求ICMP.md) — 04-28 21:51 实测 5 机 SSH 全通(用户名:air=kenair/neo=kenchoios/mini=kenchoimini/neo2=kenchoineo2);缺哥让查实地 SSH 进去验,ts-ssh 拦先等再试别劝退
+- [v1101.3 已推全队勿重复 push](feedback_v1101.3_已推全队_勿重复.md) — 04-29 21:37 已落 mini/air/neo2 三机;别只看顶部注释判版本,先看 .bak_pre_v1101.3_20260429_* + grep patch 标记 + md5 比对
+- [素材推送目标路径](feedback_素材推送目标路径.md) — 推到 `~/Desktop/<大件名>/素材/`(大件子目录),不是顶级别名 `~/Desktop/自动微头条素材/`;代码只读子目录
+- [声明前先实证](feedback_声明前先实证.md) — "全推完/同款/到位/v1101.3"这类结论必须先 ssh+grep+md5+列数据,再下结论;禁先嘴皮再补实证
+- [3 日网络对比 04-29/04-30/05-01](project_3日网络对比_2026-04-29~05-01.md) — 小旋风/全 Q6/华为电信网线 3 方案对比,基线文档在仓库根 网络对比基线_2026-04-30.md
+- [真鼠标点击勿换 CDP](feedback_真鼠标点击_勿换CDP.md) — cliclick / win32api 是反风控故意冗余,event.isTrusted + 物理轨迹绕平台检测;只优化等待/守护,不动操作层
+- [篇间等待是反限流底线](feedback_篇间等待_反限流底线.md) — 篇间 sleep 8-20s 是反频率检测,小齐改过被限流收益清零;遇"sleep 太长压缩"提议默认拒绝
+- [推文稿只存一份/分发完源必删](feedback_文稿分发只存一.md) — A→BCDE 分发完 A 删源;scp 是 cp 不删源,要主动 ssh rm;目标池别加 2 次同源 doc;跨机标题查重防类同扣分
+- [keep_canned_top 抢前台](feedback_keep_canned_top抢前台.md) — 守护脚本会误抢用户切的窗口;neo2/air 没装也不抢=本可能非必要;遇报"无法切窗"先 pkill
+- [别自己关 V2](feedback_dont_kill_v2.md) — Win 台机:杀 v2rayN/xray = 自断 Anthropic 通道,只读排查别动进程
+- [Win bat 中文编码坑](feedback_windows_bat_encoding.md) — Write 出的 bat 是 UTF-8,cmd 默认 GBK 解码必乱码,echo/title 全英文最稳
+- [改 HKCU 不要 UAC](feedback_hkcu_no_admin.md) — 清系统代理走 HKCU 普通权限可写,加 UAC 反致脚本闪退
+- [蒸馏项目 = dot-skill](project_dot_skill.md) — 装在 ~/.claude/skills/dot-skill,触发 `/dot-skill`,缺哥提"蒸馏/立 skill"对应这个
+- [5 机即时推云 · 每改必推/每创必推/不存散文件](feedback_传仓库_含push.md) — 5 机统一,任何修改/新建立即 git push,唯一权威=云端 origin,桌面/Documents 散文件零容忍
+- [改版 7 步工作流](feedback_改版工作流.md) — 故障说明→版本说明→代码→本地验证→仓库→Mac→全机验证,顺序卡死不可跳;每步开始前等缺哥确认才动(2026-05-01 缺哥拍)
+- [每发版必归档](feedback_每发版必归档.md) — 改版 7 步之后第 8 步:cp mac+win 真版到 自动发布/<大件>+版本号/,立刻 push,不积攒(2026-05-03 缺哥两次怒)
+- [4 Mac 真版位置](reference_4mac真版位置.md) — 微头条/文章在 ~/Desktop/ 4 台同款;文章定时:air+mini=`文章定时自动发布/`、neo+neo2=`Mac文章定时自动发布/`;跑中可 patch;git ahead 不一定是真漂移(2026-05-01 实证)
+- [Win 台机硬件 + 功耗 + HDD 停转](reference_台机硬件与功耗.md) — i9-9900K + 2080Ti + 5 盘(D/E/F=HDD,C/G=SSD);1 天 3 度;HDD 已设 15min 空闲停转 powercfg disk-timeout-ac 15(2026-05-02)
+- [女儿米米 — 重度尘螨过敏](project_女儿过敏.md) — 12 岁,半年余鼻炎+过敏性结膜炎,确诊重度粉尘螨;待推:卧室断源/鼻喷激素/舌下脱敏(2026-05-03)
