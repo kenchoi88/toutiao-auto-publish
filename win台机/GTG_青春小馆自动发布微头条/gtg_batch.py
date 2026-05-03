@@ -152,18 +152,56 @@ def _read_excel_sheet(sheet_name):
         return []
 
 def _append_sent_excel(name):
+    """[v1102] 写「本轮已发」sheet:行存在 count+1,不存在 append (账号, 1)"""
     try:
         _ensure_config_excel()
         wb = openpyxl.load_workbook(CONFIG_EXCEL)
         if "本轮已发" not in wb.sheetnames:
             ws_s = wb.create_sheet("本轮已发")
-            ws_s.append(["账号名"])
+            ws_s.append(["账号名", "已发次数"])
+            ws_s.append([name, 1])
         else:
             ws_s = wb["本轮已发"]
-        ws_s.append([name])
+            found_row = None
+            for row_idx, row in enumerate(ws_s.iter_rows(min_row=2, max_col=2, values_only=False), start=2):
+                if row[0].value and str(row[0].value).strip() == name:
+                    found_row = row_idx
+                    break
+            if found_row:
+                cur = ws_s.cell(row=found_row, column=2).value or 0
+                try: cur = int(cur)
+                except: cur = 0
+                ws_s.cell(row=found_row, column=2).value = cur + 1
+            else:
+                ws_s.append([name, 1])
         wb.save(CONFIG_EXCEL)
     except Exception:
         pass
+
+
+def _read_sent_with_count():
+    """[v1102] 读「本轮已发」sheet → {账号: 已发次数}"""
+    if not os.path.exists(CONFIG_EXCEL):
+        return {}
+    try:
+        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
+        if "本轮已发" not in wb.sheetnames:
+            wb.close(); return {}
+        ws_r = wb["本轮已发"]
+        result = {}
+        for row in ws_r.iter_rows(min_row=2, max_col=2, values_only=True):
+            if not row or not row[0]: continue
+            name = str(row[0]).strip()
+            if not name or name.startswith('#'): continue
+            cnt = 1
+            if len(row) > 1 and row[1] is not None:
+                try: cnt = int(row[1])
+                except: cnt = 1
+            result[name] = cnt
+        wb.close()
+        return result
+    except Exception:
+        return {}
 
 def _append_fail_list(name, reason, doc_name, round_num):
     try:
@@ -2175,9 +2213,14 @@ def run_death_grip(
             # ----- 小轮收尾:本小轮的临时跳过名单清空,下小轮全员可再尝试 -----
             log(f"\n{log_label}第 {big_round} 大循环 / 第 {sub_idx} 小轮 结束。本小轮跳过 {len(sub_skipped)} 个(下小轮恢复)。硬终止累计 {len(dead_terminated)} 个")
             sent_accounts_set.clear()
-            _clear_round_sheets()
+            # [v1102] sheet 不再小轮末 clear,累积到大循环末才 clear
 
         log(f"\n{'='*20} {log_label}第 {big_round} 大循环 结束 {'='*20}")
+        # [v1102] 全员齐活才 clear 「本轮已发」 sheet
+        active_left = [a for a in accounts if a not in dead_terminated and acc_count.get(a, 0) < per_account_quota.get(a, 0)]
+        if not active_left:
+            _clear_round_sheets()
+            log(f"  [v1102] 大循环全员齐活 → 「本轮已发」 sheet 已清空")
 
     write_status(big_round, sub_rounds, "结束",
                  total_done=_total_done(), total_target=_total_target(),
@@ -2281,12 +2324,16 @@ def main():
     # per_account_quota: 本次每个账号要发几篇
     per_account_quota = {}
 
+    # [v1102] quota 动态算 = (素材池 + 已发累计) // 账号数 — 用户拿走/添加素材都自动反映
+    sent_count_map = _read_sent_with_count()
+    sent_total = sum(sent_count_map.values())
+
     whitelist_with_q = _read_whitelist_with_quota()
     if whitelist_with_q:
         wl_map = {n: q for n, q in whitelist_with_q}
         accounts = [a for a in accounts if any(wn in a or a in wn for wn in wl_map)]
         log(f"账号配置.xlsx[白名单]已加载，白名单 {len(wl_map)} 个，过滤后剩 {len(accounts)} 个账号")
-        default_q = max(1, len(docs) // len(accounts)) if accounts else 1
+        default_q = max(1, (len(docs) + sent_total) // len(accounts)) if accounts else 1
         for a in accounts:
             matched_q = None
             for wn, wq in wl_map.items():
@@ -2295,11 +2342,19 @@ def main():
                     break
             per_account_quota[a] = matched_q if matched_q is not None else default_q
     else:
-        default_q = max(1, len(docs) // len(accounts)) if accounts else 1
+        default_q = max(1, (len(docs) + sent_total) // len(accounts)) if accounts else 1
         for a in accounts:
             per_account_quota[a] = default_q
     total_target = sum(per_account_quota.values())
     log(f"本次发布: {len(accounts)} 个账号，{len(docs)} 篇文档，配额合计 {total_target}")
+    if sent_count_map:
+        log(f"  [v1102] 素材池剩 {len(docs)} 篇 + 已发累计 {sent_total} 篇 = 总 {len(docs) + sent_total} 篇 / {len(accounts)} 账号 = 每号 quota={default_q}")
+        # 算断点
+        current_round = sent_total // len(accounts) + 1
+        done_in_round = sent_total % len(accounts)
+        remaining_in_round = len(accounts) - done_in_round
+        log(f"  [v1102] 中断恢复:第 {current_round} 小轮第 {done_in_round + 1} 账号断点(已发 {sent_total} 篇)")
+        log(f"    本小轮({current_round})剩 {remaining_in_round} 账号 + 后续 {default_q - current_round} 小轮各 {len(accounts)} 账号")
 
     if not accounts:
         log("错误: 未找到任何账号，请检查创作罐头是否正常登录")
@@ -2320,6 +2375,7 @@ def main():
         max_fail_per_sub=3,
         sent_accounts_set=sent_accounts_set,
         credit_records=credit_records,
+        initial_acc_count=sent_count_map,  # [v1102] 传入已发次数,主循环自然 acc_count<quota 停
     )
 
     acc_count        = result["acc_count"]

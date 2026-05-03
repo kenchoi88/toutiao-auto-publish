@@ -164,13 +164,64 @@ def _read_whitelist():
     return wl
 
 
+def _read_sent_with_count():
+    """[v1102] 读「本轮已发」 sheet → {账号: 已发次数}"""
+    if not os.path.exists(CONFIG_EXCEL): return {}
+    try:
+        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
+        if "本轮已发" not in wb.sheetnames: wb.close(); return {}
+        ws_r = wb["本轮已发"]
+        result = {}
+        for row in ws_r.iter_rows(min_row=2, max_col=2, values_only=True):
+            if not row or not row[0]: continue
+            name = str(row[0]).strip()
+            if not name or name.startswith('#'): continue
+            cnt = 1
+            if len(row) > 1 and row[1] is not None:
+                try: cnt = int(row[1])
+                except: cnt = 1
+            result[name] = cnt
+        wb.close(); return result
+    except Exception:
+        return {}
+
+
+def _append_sent_excel(name):
+    """[v1102] 写「本轮已发」 sheet:行存在 count+1,不存在 append (账号, 1)"""
+    if not os.path.exists(CONFIG_EXCEL): return
+    try:
+        wb = openpyxl.load_workbook(CONFIG_EXCEL)
+        if "本轮已发" not in wb.sheetnames:
+            ws_s = wb.create_sheet("本轮已发")
+            ws_s.append(["账号名", "已发次数"])
+            ws_s.append([name, 1])
+        else:
+            ws_s = wb["本轮已发"]
+            found_row = None
+            for row_idx, row in enumerate(ws_s.iter_rows(min_row=2, max_col=2, values_only=False), start=2):
+                if row[0].value and str(row[0].value).strip() == name:
+                    found_row = row_idx
+                    break
+            if found_row:
+                cur = ws_s.cell(row=found_row, column=2).value or 0
+                try: cur = int(cur)
+                except: cur = 0
+                ws_s.cell(row=found_row, column=2).value = cur + 1
+            else:
+                ws_s.append([name, 1])
+        wb.save(CONFIG_EXCEL)
+    except Exception:
+        pass
+
+
 def _expand_tasks(accounts_quota, date_str):
     """按 早/中/晚 三窗 + 1 分钟间隔 展开任务"""
     GAP_MIN = 1
     windows = [
-        ("早", "08:01", [n for n, q in accounts_quota if q >= 1]),
+        # [v1102] 缺 N 篇 → 排最后 N 个窗(剩 3=早+中+晚 / 剩 2=中+晚 / 剩 1=晚)
+        ("早", "08:01", [n for n, q in accounts_quota if q >= 3]),
         ("中", "12:01", [n for n, q in accounts_quota if q >= 2]),
-        ("晚", "19:01", [n for n, q in accounts_quota if q >= 3]),
+        ("晚", "19:01", [n for n, q in accounts_quota if q >= 1]),
     ]
     tasks = []
     for label, start_str, names in windows:
@@ -191,6 +242,17 @@ def get_docs():
     for p in ["*.docx", "*.doc"]:
         docs.extend(glob.glob(os.path.join(DOCS_FOLDER, p)))
     return sorted([d for d in docs if "已发送" not in d])
+
+
+# [v1101.4] doc_pool 顺序取 + 校验,救"分发完源必删"导致罐头找不到文件
+def _pop_doc(doc_pool):
+    """从 doc_pool 顺序取一篇实存的 docx,失效引用就地剔除。返回 None 表示池已空。"""
+    while doc_pool:
+        doc = doc_pool.pop(0)
+        if os.path.exists(doc):
+            return doc
+        log(f"  ! 源已删除(可能被外部分发),跳过: {os.path.basename(doc)}")
+    return None
 
 
 def move_to_sent(doc_path):
@@ -276,26 +338,65 @@ def main():
     if skip:
         log(f"「永久跳过」：{sorted(skip)}")
 
+    # [v1102] 主线内化中断恢复 — quota 动态算 = (素材池 + 已发累计) // 账号数
     wl = _read_whitelist()
     if wl:
+        all_accounts = [n for n, _ in wl if n not in skip and n not in EXCLUDE_ACCOUNTS]
+        wl_quota_map = {n: q for n, q in wl}
         log(f"检测到「白名单」非空 {len(wl)} 个账号 —— 本次只发白名单指定的账号")
-        accounts_quota = [(n, q) for n, q in wl if n not in skip and n not in EXCLUDE_ACCOUNTS]
-        if len(accounts_quota) != len(wl):
-            log(f"  有 {len(wl) - len(accounts_quota)} 个白名单账号被「永久跳过/排除」过滤")
+        if len(all_accounts) != len(wl):
+            log(f"  有 {len(wl) - len(all_accounts)} 个白名单账号被「永久跳过/排除」过滤")
     else:
         log("白名单为空 —— 从罐头左侧栏动态读取所有账号")
         all_names = collect_accounts(main_ws)
-        filtered = [n for n in all_names if n not in skip and n not in EXCLUDE_ACCOUNTS]
-        log(f"过滤后发文账号: {len(filtered)}")
-        accounts_quota = [(n, 3) for n in filtered]   # 早+中+晚 全开
+        all_accounts = [n for n in all_names if n not in skip and n not in EXCLUDE_ACCOUNTS]
+        wl_quota_map = {}
+        log(f"过滤后发文账号: {len(all_accounts)}")
+
+    if not all_accounts:
+        log("错误: 没有可发文账号")
+        main_ws.close()
+        return
+
+    doc_pool = list(get_docs())
+    docs_count = len(doc_pool)
+
+    sent_count_map = _read_sent_with_count()
+    sent_total = sum(sent_count_map.values())
+    quota_total = max(1, min(3, (docs_count + sent_total) // len(all_accounts)))
+    log(f"  [v1102] 素材池剩 {docs_count} 篇 + 已发累计 {sent_total} 篇 = 总 {docs_count + sent_total} 篇 / {len(all_accounts)} 账号 = 每号 quota={quota_total}(本大循环 {quota_total} 小轮)")
+
+    accounts_quota = []
+    skipped_full = 0
+    reduced = 0
+    for n in all_accounts:
+        already = sent_count_map.get(n, 0)
+        wl_q = wl_quota_map.get(n)
+        target_q = min(wl_q, quota_total) if wl_q else quota_total
+        miss = target_q - already
+        if miss <= 0:
+            skipped_full += 1
+            continue
+        if already > 0:
+            reduced += 1
+        accounts_quota.append((n, miss))
+
+    if sent_count_map:
+        current_round = sent_total // len(all_accounts) + 1
+        done_in_round = sent_total % len(all_accounts)
+        remaining_in_round = len(all_accounts) - done_in_round
+        log(f"  [v1102] 中断恢复:第 {current_round} 小轮第 {done_in_round + 1} 账号断点(已发 {sent_total} 篇,quota 满跳 {skipped_full} 个 / 部分扣 {reduced} 个)")
+        log(f"    本小轮({current_round})剩 {remaining_in_round} 账号 + 后续 {quota_total - current_round} 小轮各 {len(all_accounts)} 账号")
+        log(f"    共 {sum(q for _, q in accounts_quota)} 篇未发")
 
     if not accounts_quota:
-        log("错误: 没有可发文账号")
+        log("✓ 所有账号本大循环已齐活,无需排程")
         main_ws.close()
         return
 
     tasks = _expand_tasks(accounts_quota, date_str)
     log(f"\n共 {len(tasks)} 个定时发布任务")
+    log(f"素材池共 {docs_count} 份文稿")
 
     doc_pool = list(get_docs())
     log(f"素材池共 {len(doc_pool)} 份文稿")
@@ -346,7 +447,13 @@ def main():
             fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, "", "素材不足"))
             fail_docs_by_acct.setdefault(name, []).append("")
             continue
-        doc_path = doc_pool.pop(0)
+        # [v1101.4] _pop_doc 替代 doc_pool.pop(0): 校验存在 + 失效就地剔除
+        doc_path = _pop_doc(doc_pool)
+        if doc_path is None:
+            log("  X 素材池已空(全失效)")
+            fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, "", "素材不足"))
+            fail_docs_by_acct.setdefault(name, []).append("")
+            continue
         log(f"  文档: {os.path.basename(doc_path)}")
 
         this_task_failed = False
@@ -381,6 +488,7 @@ def main():
                         success_count += 1
                         success_by_acct[name] = success_by_acct.get(name, 0) + 1
                         log(f"  ✓ 定时发布成功: {name}")
+                        _append_sent_excel(name)  # [v1102] 写「本轮已发」count +1
                     else:
                         log(f"  X 发布失败: {reason}")
                         fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, timer_time, os.path.basename(doc_path), reason))
