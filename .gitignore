@@ -68,3 +68,4 @@ win台机/*/__pycache__/
 # stash:本地临时分析 dump（含批量素材标题，敏感不入仓；脚本 .py 仍入仓）
 stash/*.tsv
 stash/*.csv
+.tmp_mini_gtg_batch.py
