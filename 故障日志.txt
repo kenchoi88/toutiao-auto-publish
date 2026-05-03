@@ -1137,3 +1137,41 @@ Win 台机豁免: Win Tailscale 用 per-host /32 路由(每 peer 单独一条挂
 状态: ⚠️ 待修 — 4 Mac 各机加白名单;air 应急关代理(出口=国内移动)能跑,但 GitHub/Anthropic 等海外服务暂断,加白名单后可恢复
 
 ============================================================
+
+
+============================================================
+日期: 2026-05-03 09:27
+件名: NEO 文章定时 Stage 1 通宵全废 + 4 Mac 守护无白名单
+谁记的: 绣虎(Win 台机)
+
+【症状】
+- NEO 00:08 启动文章定时,9h19m 全失败(199 次"文档导入弹窗未出现 3 次 cliclick 重试均失败")
+- Stage 1 总计 81 成 / 201 失败 / 3 硬终止 → 11:28 熔断接 Stage 2
+- 缺哥 09:27 手动介入(点击罐头窗口)后立刻成功;之后又卡多次,每次手动介入即恢复
+
+【实证排除】
+- ❌ 不是飘窗:cliclick 坐标永远 (1177, 239) 不变,失败成功同坐标
+- ❌ 不是锁屏:pmset displaysleep=0 sleep=0,log show 无 lock/unlock 事件
+- ❌ 不是脚本 bug:同款代码 AIR/NEO2/MINI 跑通
+- ❌ 不是 macOS 26.4 升级:历史 04-28(2 次)/29(0)/30(1)/05-02(0) 都正常,今天突变 199 次
+- ❌ 不是罐头崩:进程 12:04AM 起一直在,CDP 49153 在线
+
+【根因】
+NEO 罐头窗口在脚本跑期间被推到后台 / 失焦 → cliclick 物理点击 (1177,239) 落到别的窗口 → 罐头收不到点击 → 弹窗永不出。缺哥手动激活罐头 → cliclick 立刻生效。
+跟 04-30 feedback_keep_canned_top抢前台.md 现象同款,差别在 NEO 这次完全没装守护。
+
+【副作用】
+AIR/NEO2/MINI 已装 v1 守护(无白名单)反向问题:缺哥要切 Finder/VS Code 看文件就被弹回 — 影响多任务。
+
+【修法 — keep_canned_top_v2.sh】
+4 Mac 统一部署带白名单的 v2 守护(NEO 首装;AIR/NEO2/MINI 替换 v1):
+- 白名单(缺哥拍):VS Code / Cursor / WeChat / Finder / Tailscale / Shadowrocket / Terminal / iTerm2 / 创作罐头自身
+- 防抖 3 次 + 1s 轮询
+- 仅 pgrep -f gtg_batch|gtg_timer 命中才生效
+- 部署前 pkill -f keep_canned_top 杀旧防叠加
+- 路径:~/keep_canned_top_v2.sh,日志 ~/keep_canned_top.log
+
+谁记的: 绣虎(Win 台机)
+状态: ✅ 已落 4 Mac
+
+============================================================
