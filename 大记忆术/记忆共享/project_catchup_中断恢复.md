@@ -26,7 +26,12 @@ originSessionId: 6198d8da-e501-4a0b-b8de-45446700703e
 - 「本轮已发」 sheet 加 **「已发次数」列** (账号, count)
 - sheet **不在小轮末 clear**,**累积到大循环末才 clear**(齐活才清)
 - 每次成功发文 → sheet 该账号 count += 1
-- 主线启动 → 读 sheet 重建 acc_count[账号] = count → 算 quota - count = 缺 N → 缺 0 跳过 / 缺 N>0 进 accounts_quota
+- 主线启动 → 读 sheet 重建 acc_count[账号] = count
+- **quota 动态算 = (已发总篇数 + 当前素材池数) // 账号数**(不是只看池剩)
+  - 例:原 750 / 150 账号,发 2 轮(300 篇已发送)+ 用户拿走 300 → 池剩 150
+  - quota_total = (300 + 150) // 150 = 3 轮
+  - 每号缺 = 3 - 2 = 1 轮 = 还要发 150 篇
+- 每号缺 N = quota_total - sent_count[账号](负数当 0,即跳过)
 - 主循环 acc_count < quota 自然停 = **不超不漏**
 
 **业务语义(缺哥拍板 2026-05-04)**:
