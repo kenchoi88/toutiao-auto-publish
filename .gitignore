@@ -69,3 +69,4 @@ win台机/*/__pycache__/
 stash/*.tsv
 stash/*.csv
 .tmp_mini_gtg_batch.py
+keep_canned_top_v2.sh
