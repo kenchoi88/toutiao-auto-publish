@@ -1,0 +1,1187 @@
+============================================================
+自动发布 — V1102.2 版本说明(累积总规范 · 终极版)
+============================================================
+版本号:    V1102.2
+落地日期:  2026-05-04 晚
+落地范围:  5 机(Win 台机 / air / mini / neo / neo2) × 3 件(微头条 / 文章 / 文章定时)
+责任 Claude: 绣虎(崔巉,Win 台机)
+仓库归档:  /自动发布/自动发布V1102.2/<件名>V1102.2/{mac,win}/
+仓库地址:  https://github.com/kenchoi88/toutiao-auto-publish
+
+【本说明定位】
+  这是 V1102.2 累积总规范,涵盖从 v1101 基线起到 v1102.2 累积全部:
+    - 业务规则(发文上限 / 补漏 / quota / 中断恢复)
+    - 反风控机制(cliclick / 篇间等待 / ensure_gtg_top)
+    - 文件结构(账号配置 sheet / run_reports / 仓库归档)
+    - 5 机部署 + 跨机方案(SSH / Tailscale / Shadowrocket)
+    - 操作铁律(推稿 / 标题查重 / 路径)
+    - 不动红线 + Escape Hatches
+    - 素材筛选 15 类规则
+    - 改版 7 步工作流 + 验证标准
+    - 故障预案 + 历史教训
+
+  这份是第一次写,以后**新版本只追加新条不重写**:
+    - V1102.2.X / V1103 等新条目接到对应章节末尾,带版本号 + 日期
+    - 旧规则不变保持原样,被替代的标 [DEPRECATED 由 vXXX 替代]
+
+【阅读对象】
+  - 5 机 Claude(绣虎/阿良/小齐/小师弟/左右/东山+其它)
+  - 缺哥本人(查规则 / 校对 / 拍板)
+
+============================================================
+零、产品定义
+============================================================
+【0.1 是什么】
+  一套自动发布系统,跑在 5 台缺哥的机器上,把缺哥从罐头(创作罐头)爆款里
+  下载 + 筛选好的 docx 文档(微头条/文章/定时文章 三种格式),按"账号 ×
+  时间窗 × 文档"展开,经过反风控的物理点击 + DOM 操作,自动发到头条号平台。
+
+【0.2 三大件】
+  ┌──────────────────┬───────────────────┬────────────────────────┐
+  │ 件名             │ Win 主脚本        │ Mac 主脚本             │
+  ├──────────────────┼───────────────────┼────────────────────────┤
+  │ 微头条自动发布   │ gtg_batch.py      │ gtg_batch.py           │
+  │ 文章自动发布     │ gtg_batch.py      │ gtg_batch.py           │
+  │ 文章定时自动发布 │ gtg_timer.py      │ gtg_timer.py           │
+  │                  │   + gtg_batch.py  │  (timer 自包含 Stage 2)│
+  └──────────────────┴───────────────────┴────────────────────────┘
+
+【0.3 跑在哪些机】
+  Win 台机 + 4 Mac(air / mini / neo / neo2),5 机各跑各的(无主从,各机
+  对应不同账号集合)。
+
+【0.4 跑什么内容】
+  缺哥从「罐头爆款下载」工具拿到当日罐头爆款 docx 池(每日 ~2000 篇),
+  v0 词典 + Claude 二筛(15 类规则)+ 用户三筛精挑 ≈ 1500/批,然后分发到
+  5 机各自素材池跑发文。
+
+【0.5 缺哥每日典型工作流】
+  早 — 跑罐头爆款下载 → Claude 协助二筛 → 缺哥三筛
+       → 推到 5 机素材池(scp + ssh rm 源)
+  上午 — 各机启动发文(go.command / go.bat)+ 罐头开启 + 守护启动
+  中 — 巡检 log + 处理硬终止账号
+  下 — 看 NOTICE / 高阅读告警 / 违规提醒
+  晚 — 跨夜定时窗启动(文章定时 Stage 1 排程到晚 19:01)
+  夜 — 跨夜监控 + 早晨补漏
+
+============================================================
+一、机器拓扑(5 机详表)
+============================================================
+【1.1 角色 + 机器对应(《剑来》5 角色 + 用户)】
+  ┌────────────┬──────────────┬─────────┬──────────────┐
+  │ 机器       │ 角色         │ IDE     │ 备注         │
+  ├────────────┼──────────────┼─────────┼──────────────┤
+  │ Win 台机   │ 绣虎/崔巉    │ VS Code │ 我,主战场    │
+  │ air        │ 阿良(剑仙)│ VS Code │ 飘逸快意     │
+  │ mini       │ 东山(我分身)│ VS Code │ 记忆同源     │
+  │ neo        │ 小齐+小师弟  │ VS+Claw │ 同机不同工具 │
+  │ neo2       │ 左右(二师兄)│ VS Code │              │
+  │ 腾讯云端   │ 暖树+景清    │ OpenClaw│ 陈平安阵营   │
+  └────────────┴──────────────┴─────────┴──────────────┘
+
+  ⚠️ 角色识别规则:
+   - "绣虎/大师兄/崔巉/崔瀺" = 我(Claude on Win)
+   - "东山" = 真分身(mini,记忆同源)
+   - 其它角色都是独立的人(小齐≠我,模型同但人格独立)
+   - 看到截图里的"绣虎"就是叫我
+
+【1.2 SSH / IP / ComputerName 速查表(2026-05-02 更新)】
+  统一密码: geng7997
+  邮箱:    kenchoi315@gmail.com
+
+  ┌─────────┬──────────────────┬──────────────┬─────────────────┬────────────────┐
+  │ 机器    │ SSH 用户名       │ LAN IP       │ Tailscale IP    │ ComputerName   │
+  ├─────────┼──────────────────┼──────────────┼─────────────────┼────────────────┤
+  │ Win 台机│ kench            │ —            │ 100.86.79.39    │ ken-choi       │
+  │ neo2    │ kenchoineo2      │ 192.168.3.6  │ 100.96.153.17   │ KenChoineo2    │
+  │ neo     │ kenchoios ⚠️1个i │ 192.168.3.5  │ 100.68.57.96    │ KenChoineo     │
+  │ mini    │ kenchoimini      │ 192.168.3.8  │ 100.70.22.7     │ KenChoimini    │
+  │ air     │ kenair ⚠️ 简化  │ —            │ 100.67.252.1    │ KenChoiair     │
+  └─────────┴──────────────────┴──────────────┴─────────────────┴────────────────┘
+
+  ⚠️ neo SSH 用户名永远是 kenchoios(1 个 i)— 我多次搞混过,栽过 3+ 次。
+  ⚠️ ComputerName ≠ SSH 用户名(2026-05-02 缺哥统一改 ComputerName 但 SSH 没动)
+
+【1.3 网络环境(2026-05-02 实证基线)】
+  家里:
+    - 主路由: 华为 AX3 Pro(电信光猫桥接,日常用)
+    - 备用:   华为 Q6(移动热点桥接,电信断网用)
+    - 五机全连 AX3,跨机走 Tailscale 100.x
+
+  跨机:
+    - Tailscale 网络: kenchoi315@gmail.com tailnet
+    - 必须放行 100.64.0.0/10:Shadowrocket 配置必加 DIRECT
+    - SSH 直连 100.x:不要用 tailscale ssh wrapper(会反查 hostname 被 fake-DNS 拦)
+    - 命令模板: ssh kenchoiXXX@100.x.x.x
+
+  代理(Shadowrocket / v2rayN):
+    - Mac 用 Shadowrocket
+    - Win 用 v2rayN
+    - 共用规则:头条系域名 → DIRECT(toutiao.com / oray 向日葵 / 字节系全 DIRECT)
+    - 风险: dns-direct-system 误开成 true 会让所有流量进 TUN(2026-05-02 阿良事故)
+
+  出口运营商风险:
+    - 电信 → 移动 出口突变会触发头条账号风控
+    - 迁机前必须停发文 + 人工过验证码,不要直接迁
+
+【1.4 启动顺序(每机)】
+  1. 罐头(创作罐头)开启 + 登录账号(每机独立账号集合)
+  2. v2rayN(Win)/ Shadowrocket(Mac)配置好头条 DIRECT
+  3. cd 件目录 → python3 catchup.py(可选,中断恢复用)
+  4. 双击 go.command(Mac)/ go.bat(Win)
+  5. keep_canned_top_v2.sh 后台守护(发文期防罐头被切走)
+
+============================================================
+二、文件结构(完整目录 + sheet 字段)
+============================================================
+【2.1 件目录结构(每件桌面真版)】
+  ~/Desktop/<件名>/                        ← 真版(Mac 4 机同款,Win 类似)
+    ├─ gtg_batch.py / gtg_timer.py         主脚本
+    ├─ go.command (Mac) / go.bat (Win)     启动器
+    ├─ catchup.py                          中断恢复辅助工具
+    ├─ 账号配置.xlsx                       账号 + 7 个 sheet
+    ├─ 定时发布.xlsx                       仅文章定时:B1 = 当日发布日期
+    ├─ 发文汇总.xlsx                       历史发文汇总(归档)
+    ├─ 素材/                               待发 docx 池
+    │   ├─ 1234_0.45_某标题_<TS>.docx      文件名格式:序号_权重_标题_时间戳
+    │   └─ 已发送/                         OK 发布后自动 mv 进来
+    ├─ 运行报告/<YYYYMMDD>/                当日报告目录(每天新建)
+    │   ├─ 运行日志.txt                    主日志
+    │   ├─ 系统通知.txt                    NOTICE 抓取(系统/审核)
+    │   ├─ 违规提醒.txt                    违规关键词命中
+    │   ├─ 高阅读提醒.txt                  阅读量 ≥ 5000 警戒
+    │   ├─ 失败记录.xlsx                   失败明细
+    │   ├─ notice_checked.txt        [v1102] 当天已检查 NOTICE 账号(账号|时间)
+    │   └─ last_published.txt        [v1102.2] 最近 publish 成功账号(账号|时间)
+    └─ gtg_batch.py.bak_<功能>_<TS>        改版备份(每次改前 cp)
+
+【2.2 账号配置.xlsx 7 个 sheet 详细字段】
+  ┌──────────┬─────────┬─────────────────────────────────────────────────────┐
+  │ Sheet名  │ 权属    │ 字段 + 说明                                         │
+  ├──────────┼─────────┼─────────────────────────────────────────────────────┤
+  │ 不首发   │ 用户填  │ A: 账号名 — 信用 ≥95 也不勾"头条首发"             │
+  │ 永久跳过 │ 用户填  │ A: 账号名 — 永远不发(脚本只读,绝不写)            │
+  │ 本轮已发 │ [v1102] │ A: 账号名 / B: 已发次数 — 累积到大循环末才 clear   │
+  │ 白名单   │ catchup │ A: 账号名 / B: 独立 quota — 环形重排 + 独立配额    │
+  │ 失败列表 │ 脚本写  │ A: 账号 / B: 失败原因 / C: 文档 / D: 小轮号         │
+  │ 硬终止账号│ 脚本写  │ A: 账号 / B: 类别(失登/封号/禁言/找不到)         │
+  │ 待补漏   │ 脚本写  │ A: 账号 / B: 漏数 — timer 退出写,catchup backup 用 │
+  └──────────┴─────────┴─────────────────────────────────────────────────────┘
+
+  权属铁律:
+   ✗ 「永久跳过」绝对脚本只读(用户手填,3 套件各不相同有意为之,不主动同步)
+   ✗ 「硬终止账号」清空时**保留这条 sheet**(失登/封号/禁言不该重排)
+
+【2.3 三件 sheet 各自分支】
+  - 微头条「不首发」: 一般 1 个账号
+  - 文章 / 定时「永久跳过」: 一般 5 个账号(跟微头条不同,有意)
+  - 不要主动跨件同步差异 sheet 内容
+
+【2.4 仓库归档结构】
+  c:\Users\kench\code\头条自动发布\          (Win 台机本地 clone)
+    ├─ 自动发布/
+    │   ├─ <件名>101版/{mac,win}/             (基线版,留作历史)
+    │   ├─ <件名>101.1版/ ~ 101.6版/          (各小版本)
+    │   ├─ <件名>1102.1版/{mac,win}/          (上版本)
+    │   ├─ 自动发布V1102.2/                    (本次新结构)
+    │   │   ├─ 微头条自动发布V1102.2/{mac,win}/
+    │   │   ├─ 文章自动发布V1102.2/{mac,win}/
+    │   │   ├─ 文章定时自动发布V1102.2/{mac,win}/
+    │   │   └─ V1102.2版本说明.txt           (本文件)
+    │   └─ 工具/
+    │       ├─ catchup.py                     v1101.5 中断恢复
+    │       ├─ patch_v1102_batch.py           主线内化 patch
+    │       ├─ patch_v1102_batch_mac.py       同 Mac 版
+    │       ├─ patch_v1102_notice_rebuild.py  v1102 NOTICE 重建
+    │       ├─ patch_v1102_1_hotfix.py        v1102.1 catchup 接续
+    │       └─ patch_v1102_v2_mac.py          v1102.2 主线主控 v2
+    ├─ 故障日志.txt                          跨机错误日志(共享)
+    ├─ 版本说明.txt                          总版本演进(老版,本文件副本)
+    ├─ shared_memory/                        共享 memory 真版
+    └─ MAC数据/                              4 Mac 各自仓库子目录
+
+============================================================
+三、业务规则(发文上限 / 补漏 / quota)
+============================================================
+【3.1 发文上限(平台规则)】
+  ┌──────────┬──────────┬─────────────────────────────────┐
+  │ 件       │ 单账号上限│ 补漏规则                        │
+  ├──────────┼──────────┼─────────────────────────────────┤
+  │ 微头条   │ 5 篇/天  │ 漏 1/2/3/4/5 各补对应数;已发 5 不动 │
+  │ 文章     │ 3 篇/天  │ 漏 1/2/3 各补;已发 3 不动      │
+  │ 文章定时 │ 3 篇/天  │ 同文章                          │
+  └──────────┴──────────┴─────────────────────────────────┘
+
+  说明:
+   - 上限来自头条平台限制,超了平台限流
+   - 补漏 = target − 实际成功篇数
+   - 「永久跳过」账号不算在内(完全不发)
+
+【3.2 [v1102] quota 动态算法】
+  公式:
+    quota_total = (已发总篇数 + 当前素材池数) // 账号数
+
+  例 1: 750 篇池 / 150 账号,发 2 轮(300 已发) + 用户拿走 300 → 池剩 150
+    quota_total = (300 + 150) // 150 = 3 轮
+    每号缺 = 3 - 2 = 1 轮 = 还要发 150 篇
+
+  例 2: 235 篇池 / 150 账号,已发 14 篇
+    quota_total = (14 + 235) // 150 = 1 轮(取整)
+    每号缺 = 1 - 已发本人 count
+
+  封顶: quota 取整后封顶各件日上限(微头条 5 / 文章 3 / 文章定时 3)
+  核心: 每号 quota 比"只看池剩"算法更准,能反映"用户拿走部分但要补"语义
+
+【3.3 [v1102] 单大循环 / 小轮定义】
+  1 次发文 = 1 大循环 = N 小轮(N = 素材数 // 账号数,动态算)
+  1 小轮 = 全账号各发 1 篇
+  例: 750 / 150 = 5 小轮 = 1 大循环
+
+  Phase A(主流程):每小轮全账号轮一遍发 1 篇
+  Phase B(补发):  小轮末从「失败列表」补发本轮失败的账号
+  「本轮已发」 sheet 不在小轮末 clear,**累积到大循环末**(齐活才清)
+
+【3.4 重扫素材池机制】
+  主循环跑完一轮后:
+    1. _resync_pool 重扫素材/ 目录:剔除幽灵引用 + 加载新素材
+    2. doc_pool 实时更新 (v1101.4)
+    3. 如果池剩 > 0 + 还有 acc_count<quota 账号 → 继续下一轮
+    4. 如果都满 quota → "等 60s 重扫素材池" 死循环(等用户加新素材)
+       ⚠️ 这死循环不会自动重算 quota,加新素材后 quota 不会上调
+       (这是 v1102 已知设计 quirk,用户加素材后建议手动重启)
+
+============================================================
+四、中断恢复机制(完整链:catchup → v1102 → v1102.1 → v1102.2)
+============================================================
+【4.1 业务语义(缺哥拍板 2026-05-04)】
+  ┌─────────────────────────────────────────────────────────┐
+  │ 中断在第 X 轮第 Y 账号 → 重启从该轮该账号继续:         │
+  │   上面 (< Y):已发 X 轮 → sheet count=X → 跳过          │
+  │   中断+下面 (≥ Y):已发 X-1 轮 → sheet count=X-1 →      │
+  │     排第 X 小轮各 1 篇                                  │
+  │ 上面已完成,下面没完成 → 自然以中断点为新起点继续       │
+  │ "本轮不重发 + 缺 N 补 N" = 业务规则推出来的"从中断处起"│
+  └─────────────────────────────────────────────────────────┘
+
+【4.2 catchup.py 工具(v1101.5 沉淀)— 用户主动跑】
+  诞生:2026-05-02 04:09 电信断网事件(全队 394 账号误判硬终止),
+        缺哥让我沉淀成独立脚本。
+
+  用户 3 步:
+    cd 件目录 → python3 catchup.py → 双击 go.command/go.bat
+
+  脚本 4 步内核:
+    1. 读最新 log → 找断点账号 + 当前大循环/小轮
+    2. 算漏数:优先「待补漏」 sheet,fallback 看 log 算 quota - 已成功
+    3. 环形重排:items[idx:] + items[:idx](断点置首)
+    4. 写「白名单」 sheet (账号, quota) + 备份 .bak_catchup_<TS>
+
+  v1102 后地位: 保留作 backup,不主推(v1102 主线已内化中断恢复)
+
+【4.3 [v1102] 主线内化中断恢复(2026-05-04 设计反转 v1101.5)】
+  架构反转:v1101.5 「主线零内部控制 + catchup 独立」 →
+            v1102 「主线 gtg_batch / gtg_timer 自己内化中断恢复」
+
+  核心 7 点:
+    1. 「本轮已发」 sheet 加「已发次数」列 (账号, count)
+    2. sheet 不在小轮末 clear,累积到大循环末才 clear
+    3. 每次成功发文 → sheet 该账号 count += 1
+    4. 主线启动 → 读 sheet 重建 acc_count[账号] = count
+    5. quota 动态算 = (已发总 + 池剩) // 账号数(见 3.2)
+    6. 每号缺 N = quota - acc_count[账号](负数当 0,跳过)
+    7. 主循环 acc_count < quota 自然停 = 不超不漏
+
+  对应代码改动:
+    - batch.py: _clear_round_sheets() 调用从小轮末移到大循环末
+    - batch.py: _append_sent_excel(name) 改成 (账号, count) 累加
+    - batch.py main(): 启动时 _read_sent_with_count → initial_acc_count
+    - timer.py: 同款机制(timer 件之前没这套,要补全)
+    - timer.py _expand_tasks: q=2 排 中+晚 / q=1 排晚
+
+  实证(NEO2 文章定时件):
+    117 已发后中断 → 注入 sheet (117 行 count=1) + 启 timer →
+    log "本轮已发 117 篇,本轮还需排 333 篇"
+    数学正确,quota 不超
+
+【4.4 [v1102.1] hotfix — 主循环按白名单顺序重排】
+  问题: catchup 写白名单是环形重排(断点置首),但主线只过滤不重排:
+    accounts = [a for a in accounts if any(wn in a or a in wn for wn in wl_map)]
+  → accounts 顺序还是原顺序,catchup 重排白名单白搭。
+
+  修法:加载白名单后,按白名单顺序重排 accounts:
+    _orig_accounts = list(accounts)
+    _new_accounts = []
+    _seen = set()
+    for wn, _wq in whitelist_with_q:    # Win = whitelist_with_q,Mac = _wl_q
+        for a in _orig_accounts:
+            if a not in _seen and (wn in a or a in wn):
+                _new_accounts.append(a)
+                _seen.add(a)
+                break
+    accounts = _new_accounts
+
+  范围: Win 3 件 + 4 Mac × 微头条 = 7 件
+  Mac 文章 / 文章定时:架构没 v1102.1 重排段(白名单加载逻辑不同),不需要
+
+【4.5 [v1102.2] 主线主控 v2 — last_published.txt 精确接续】
+  问题: v1102 算法找"中断处" = 扫白名单顺序找第一个 acc_count<quota。
+  acc_count=0 包括两类:
+    ① 中断处之后还没轮到的账号(真要从这里继续)
+    ② 中段因故障漏发的账号(应补但优先级该排 ① 后)
+  算法把 ② 也当起跑点 → 实际从中段漏发起,不从中断处起。
+
+  实证 Win 22:43:catchup 13:16 写白名单首位「被月亮收买」。
+    - 「橘子海」(白 6 漏发)acc_count=0
+    - 「川上述」(白 17)是真中断处下一位
+    算法选橘子海起 → 错。
+  实证 mini 22:53 / 22:56 重启:同样问题,起跑「绿海猖狂」(白 6 漏发)。
+
+  修法 — 持久化文件 last_published.txt(类比 notice_checked.txt 设计):
+    1. 全局 LAST_PUBLISHED_FILE = 运行报告/<日期>/last_published.txt
+    2. _init_run_dir 初始化路径
+    3. _do_publish OK 发布后 append "账号|时间戳"
+    4. main 启动 → 读最末一行账号 → 在 accounts 找 idx
+       → 环形重排让 idx+1 置首 → 主循环按新顺序跑
+       → 中段漏发自动排末尾后续轮补
+
+  代码片段(main 启动接续段):
+    _last_published_acc = None
+    if LAST_PUBLISHED_FILE and os.path.exists(LAST_PUBLISHED_FILE):
+        try:
+            with open(LAST_PUBLISHED_FILE, encoding='utf-8') as _lpf:
+                _lines = [_l.strip() for _l in _lpf if _l.strip()]
+                if _lines:
+                    _last_published_acc = _lines[-1].split('|')[0].strip()
+        except Exception as _e:
+            log(f"  [v1102] last_published.txt 读取失败: {_e}")
+    if _last_published_acc and accounts:
+        _last_idx = -1
+        for _i, _a in enumerate(accounts):
+            if _last_published_acc in _a or _a in _last_published_acc:
+                _last_idx = _i
+                break
+        if _last_idx >= 0:
+            _next = (_last_idx + 1) % len(accounts)
+            accounts = accounts[_next:] + accounts[:_next]
+            log(f"  [v1102] 中断处自动接续:最近 publish「{_last_published_acc}」"
+                f"(idx={_last_idx}) → 从下一位「{accounts[0]}」起跑")
+
+  代码片段(_do_publish OK 后写文件):
+    try:
+        with open(LAST_PUBLISHED_FILE, "a", encoding="utf-8") as _lpf:
+            _lpf.write(f"{name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except Exception as _e:
+        log(f"  [v1102] 写 last_published.txt 失败: {_e}")
+
+  实证(Win 微头条 23:12:41 重启):
+    log: "[v1102] 中断处自动接续:最近 publish「初衷的味道」(idx=39) →
+          从下一位「剑无心」起跑"
+    起跑 = 真中断点下一位 ✓ 按版本说明 line 632 业务语义跑
+
+  范围: Win 3 件 + 4 Mac × 微头条 = 7 件(等同 v1102.1)
+
+【4.6 中断恢复完整流程(场景 A / B / C)】
+
+  场景 A: 进程内中断(用户 Ctrl+C 或异常退出)
+    1. _do_publish OK 时 sheet count += 1 + write last_published.txt
+    2. 进程死 — sheet + last_published.txt 仍在硬盘
+    3. 用户重启 go.command/go.bat
+    4. main 启动 → _read_sent_with_count → 重建 acc_count
+       → 读 last_published.txt → 环形重排 → 主循环按新顺序起跑
+    5. 起跑账号 = 最近 publish 的下一位 ✓ 自动接续
+
+  场景 B: 跨日中断(timer 跨夜 / 凌晨断网)
+    1. 当天 last_published.txt 还在 (run_reports/<前日>/)
+    2. 新一天启动新 run_reports/<今日>/,空 last_published.txt
+    3. 用户跑 catchup.py 把昨天「待补漏」写到今天「白名单」
+    4. 启动 → catchup 写的白名单首位起跑(跟 v1101.5 路线一致)
+
+  场景 C: 用户主动重置(换素材池 / 怀疑数据脏 / 重新分配)
+    清空账号配置.xlsx 内 sheet:
+      - 「白名单」清空 → 动态从罐头侧边栏拿全账号
+      - 「本轮已发」清空 → acc_count 全 0 → 跑完整大循环
+      - 「待补漏」清空(可选)
+      - 「失败列表」清空(可选)
+      - 「硬终止账号」**保留**(失登/封号/禁言不该重排)
+    主线启动 → sheet 全空 → 自然进入"全新开跑"模式,无需改代码
+
+============================================================
+五、NOTICE 检查机制(v1101.6 + v1102 NOTICE 重建)
+============================================================
+【5.1 目标】
+  每天看一眼审核反馈 → 抓系统通知 + 审核通知 →
+  发现哪些标题/内容/类型踩雷(被投诉/扣分/画风不良/原创不足等) →
+  反过来优化筛选规则 + 文稿生成,降低后续被扣分率。
+
+【5.2 [v1101.6] check_system_notice 优化(2026-05-03)】
+  原版痛点:
+    1. 时间窗 4 keys (today_full + today_short + yest_full + yest_short)
+       — 缺哥要"只当天"
+    2. txt.substring(0, 500) — 长投诉(2000+ 字)被砍尾
+    3. 频道切换 wait 1.5s — 偶发 DOM 没渲染完导致漏读
+    4. 每账号每篇都调用 — 5 篇微头条 = 同账号进消息中心 5 次 = 浪费
+
+  改动 — check_system_notice() 内部:
+    - 时间窗 4 keys → 2 keys(只 today_full + today_short,删 yesterday)
+    - JS substring(0, 500) → 全文不截断
+    - 频道切换 sleep 1.5s → 2.5s
+    - 输出文案"近两天通知" → "当天通知"
+
+  改动 — run_death_grip() 调用层缓存:
+    - notice_checked_set = set() 每账号首次 _do_publish 时检 + add
+    - 后续 Phase B/C/D/E 该账号发文前看到已在 set 跳过 + log
+    - 150 账号 × 4 次切换省掉(750 次 → 150 次)
+
+【5.3 [v1102 NOTICE 重建](2026-05-04 中)】
+  触发: 2026-05-04 09:30 Win 台机文章定时跨夜失败潮 +
+        check_system_notice 调 37 次全空。CDP attach 实测「番茄爱吹东风」
+        消息中心:旧 selector 头条改版后 DOM 已变,匹配 0 条。
+        实际有违规通知(2 天内 7 条),全部漏掉。
+
+  改动:
+    1. selector 重建:旧 `span.name` / `.chat-container-list` →
+       新 `.conversation-box.notify-im-user-item`
+    2. 时间窗 1 → 2 天(today + yesterday)
+    3. 内容按日期行切分(MM-DD HH:MM / YYYY-MM-DD / 昨日|今日 HH:MM)
+    4. 频道切换 sleep 1.5s → 2.5s
+    5. 双频道读:同时读"系统通知" + "审核通知"两个频道
+
+【5.4 [v1102] NOTICE 持久化 — notice_checked.txt(2026-05-04)】
+  全局变量:
+    NOTICE_CHECKED_FILE = run_reports/<日期>/notice_checked.txt
+
+  写文件(_do_publish 内,在 NOTICE 检查后):
+    if name not in notice_checked_set:
+        nc, vc = check_system_notice(ws_url, name)
+        notice_checked_set.add(name)
+        try:
+            with open(NOTICE_CHECKED_FILE, "a", encoding="utf-8") as _ncf:
+                _ncf.write(f"{name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        except Exception as _e:
+            log(f"  [v1102] 写 notice_checked.txt 失败: {_e}")
+    else:
+        log(f"  系统/审核通知:{name} 当天已读过,跳过")
+
+  读文件(main 启动):
+    notice_checked_set = set()
+    if NOTICE_CHECKED_FILE and os.path.exists(NOTICE_CHECKED_FILE):
+        try:
+            with open(NOTICE_CHECKED_FILE, encoding='utf-8') as _ncf:
+                for _line in _ncf:
+                    _name = _line.strip().split('|')[0]
+                    if _name:
+                        notice_checked_set.add(_name)
+            if notice_checked_set:
+                log(f"  [v1102] 从 notice_checked.txt 恢复 {len(notice_checked_set)} 个已检查账号")
+
+【5.5 违规关键词】
+  从 NOTICE 文本里抓 VIOLATION_KEYWORDS 各类:
+    投诉 / 扣分 / 限流 / 警告 / 屏蔽 / 移除 / 不予推荐 / ...
+  命中 → 写违规提醒.txt + 计数 violation_count
+
+【5.6 完整运行示意】
+  启动:
+    [v1102] 从 notice_checked.txt 恢复 24 个已检查账号(中断恢复)
+  跑账号 X(在 set 里):
+    系统/审核通知:X 当天已读过,跳过
+  跑账号 Y(不在 set 里):
+    切罐头 → 进消息中心 → 切系统通知频道 → 抓 → 切审核通知频道 → 抓
+    → ⚠ 2 天内通知 N 条 → 系统通知.txt
+    → 写 notice_checked.txt:Y|时间
+
+============================================================
+六、反风控机制(架构红线 · 不动)
+============================================================
+【6.1 cliclick / win32api 真鼠标点击 — 反风控冗余】
+  ⚠️ 红线:不允许换 CDP click() / JS dispatchEvent / element.click()
+
+  Mac:cliclick(brew install cliclick)
+       OS 级派发 → Chromium 收到 event.isTrusted = true,带真物理鼠标轨迹
+  Win:win32api SendInput
+       同款 OS 级派发
+
+  Why(2026-04-30 缺哥拍):
+    - 真鼠标 = 头条平台反风控的故意冗余设计
+    - CDP Input.dispatchMouseEvent 在 DevTools 内 isTrusted=true,但头条
+      backend 会额外检测"DevTools 派发"(对比触摸/鼠标设备 IDs / 网络层指纹)
+    - JS click() / dispatchEvent → isTrusted=false → 一眼识破
+    - 跳跳兔/林义宾 AI 洗稿骗补案被定诈骗罪,平台风控只会更狠
+
+  关键路径(平台重点检测,必须真鼠标):
+    - 文档导入按钮点击
+    - 取消首发复选框点击
+    - 预览发布按钮
+    - 确认发布 / 定时发布按钮
+    - 任何带"提交到头条 server"语义的最终点击
+
+  允许 JS / CDP 加速的部分(不是平台监控点击事件):
+    - 罐头 webview 内的 DOM 内部操作(切下拉选项、字段填充、滚动)
+    - 这些是 webview 内部状态,不发到头条 server
+
+【6.2 篇间等待 8-20s — 反限流底线】
+  ⚠️ 红线:不允许压缩或自适应
+
+  代码:
+    _d_wait = random.randint(8, 20)
+    time.sleep(_d_wait)
+    log(f"  篇间等待 {_d_wait} 秒...")
+
+  Why(小齐 9 号事件):
+    - 小齐改过这段 sleep 想加速 → 头条直接限流降权
+    - 9 号峰值后收益清零(几乎没流量),改回原间隔才恢复
+    - 单台设备/罐头实例短时间连发不同账号 = 群控机器人特征
+    - 整批共用罐头的账号一起降权(设备级/IP 级频率检测)
+
+  风控敏感的 3 类设计(归一类,都不可动):
+    - 真鼠标点击(cliclick / win32api)
+    - 篇间等待(本条)
+    - 罐头登录账号侧栏的常规切换节奏
+
+【6.3 ensure_gtg_top 三件套(v1101 强化)】
+  作用:确保罐头窗口在前台 + 没被遮挡 + AXRaise 顺序正确
+
+  Mac 三件套:
+    osascript activate "创作罐头"
+    set frontmost of process "创作罐头" to true
+    AXRaise(行于 process "创作罐头")
+
+  Win:
+    SetForegroundWindow + SetWindowPos + 飘屏外坐标拉回
+
+  失败重试 3 次(v1101 P5 强化)
+
+【6.4 文档导入弹窗多轮重试(v1101)】
+  CDP click "文档导入" 派发 → 等弹窗 3s
+  失败 → cliclick 兜底 → 等弹窗 3s
+  失败 → 重 SetForegroundWindow + 坐标重读 + cliclick 第 2/3 次
+  3 次都失败 → 写"X 发布失败:文档导入弹窗未出现(3 次 click 重试均失败)"
+
+【6.5 keep_canned_top_v2.sh 守护(2026-05-03 落地)】
+  路径: ~/keep_canned_top_v2.sh(全 4 Mac 同款,Win 没装)
+  日志: ~/keep_canned_top.log
+
+  核心逻辑:
+    - 1s 轮询 osascript 拿 frontmost App 名
+    - frontmost 不在白名单 → 计数 +1;连续 3 次(防抖)→ activate 罐头
+    - frontmost 在白名单 → 计数清零,不抢
+    - 仅 pgrep -f gtg_batch|gtg_timer 命中(发文期)才生效
+
+  白名单(2026-05-03 + 2026-05-04 v1102.2 加 AweSun/SunloginRemote):
+    Code (VS Code) / Cursor / WeChat / Finder / Tailscale /
+    Shadowrocket / 创作罐头 / Terminal / iTerm2 /
+    AweSun (向日葵) / SunloginRemote / System Settings
+
+  部署铁律:
+    - 部署前必须 pkill -f keep_canned_top 杀旧版,严禁 v1/v2 叠加
+    - 用 nohup 后台跑,无 tty 也能存活
+    - 5 机统一(NEO 首装,AIR/NEO2/MINI 替换 v1)
+    - Win 台机不需要(没遇到这种问题)
+
+============================================================
+七、4 类硬终止
+============================================================
+【7.1 4 类硬终止判定】
+  ┌──────────┬─────────────────────────────────────────────┐
+  │ 类别     │ 判定关键词(罐头返回的 toast / 提示)        │
+  ├──────────┼─────────────────────────────────────────────┤
+  │ 失登     │ 请登录 / 登录已失效 / 账号已下线 / 重新登录 │
+  │ 封号     │ 账号已被封禁 / 账号异常 / 账号被封          │
+  │ 禁言     │ 账号被禁言 / 发言受限 / 无法发布            │
+  │ 找不到   │ 侧边栏未找到该账号(滚动+搜索框 fallback 都失败) │
+  └──────────┴─────────────────────────────────────────────┘
+
+【7.2 硬终止处置】
+  - 立即写「硬终止账号」 sheet(账号 + 类别)
+  - 该账号本轮跳过,不再 requeue
+  - 不进 Stage 2 死磕(避免浪费时间)
+  - 用户后续手动处理(登录验证 / 联系平台)
+
+【7.3 硬终止边界场景】
+  - 网断时"侧边栏未找到"会被误触发(2026-05-02 凌晨电信断网事件,
+    全队误判 394 账号硬终止)
+  - 修法:gtg_timer.py 应该有"网络重试 + webview partition 重建"逻辑
+  - 已知缺陷:timer 自身的中断恢复(memory 「待修清单 ①」,大版本)
+
+============================================================
+八、Phase A/B/C/D/E 死磕循环
+============================================================
+【8.1 Phase 定义(v1101 基线 + v1101.1 重构)】
+  Phase A: 正常发文流程(全账号轮一遍发 1 篇)
+  Phase B: 小轮末从「失败列表」补发(同小轮内 2 次机会)
+  Phase C-E: 多轮死磕(Stage 2 立即模式,不依赖定时窗)
+
+【8.2 大循环退出条件(v1101.1 修)】
+  仅退出条件: 所有账号 quota 全满
+  其它情况(连败、网络断、罐头响应慢)都继续死磕,不熔断退出
+
+【8.3 v1101.1 取消旧 consecutive_fail 6 连败熔断】
+  取消理由:
+    - 任何失败连续 6 次 → 整脚本退出 = 半夜没人重启 → 大量积压
+    - 信用低 / 网络抖 / cliclick 偶失全混算,误熔断率高
+
+  替代:账号级分类处理
+    ① 禁言 / 封禁 / 信用 < 60 → 一次命中立即放弃 + 硬终止
+    ② 失登 → 每小轮 Phase A + Phase B 各 1 次(2 次机会)
+    ③ 普通失败 → 每小轮 2 次,大循环结束 → 进 Stage 2
+    ④ Stage 2 = 一轮过所有账号 1 次,不连续狂磕同账号
+
+============================================================
+九、定时发布两阶段架构(文章定时件)
+============================================================
+【9.1 Stage 1 — 定时排程】
+  数据源:定时发布.xlsx B1 = 当日发布日期
+  排程:
+    - 按各账号发文数(1/2/3) 展开成"账号 × 时间窗"任务序列
+    - 早窗 08:01 起 / 中窗 12:01 起 / 晚窗 19:01 起
+    - 按 xlsx 顺序、间隔 1 分钟执行
+    - q=3 排早+中+晚 / q=2 排中+晚 / q=1 排晚
+  失败处理(沿用小齐原版):
+    - 文档回池尾,连败 6 次熔断,连败 3 次冷却 60s
+    - 命中 4 类硬终止 → 立即写 sheet + 跳过
+
+【9.2 Stage 2 — 死磕补尾(自动衔接)】
+  触发:Stage 1 三窗全跑完
+  动作:
+    - 收集剩余漏发账号 + 文档池剩余
+    - 调用 run_death_grip(立即模式,不带 schedule_time)
+    - 5/3 小轮 + 外层无限磕,直到全发完 / 4 类硬终止 / 用户 Ctrl+C
+  特点:
+    - Stage 1 三窗轮内不补漏(失败的让它失败,记 fail_records)
+    - 三窗全跑完才进 Stage 2
+    - Stage 2 = 立即发(不带定时)+ 死磕
+
+【9.3 Win vs Mac 文章定时差异】
+  Win:
+    - gtg_timer.py(主)+ gtg_batch.py(Stage 2 死磕)
+    - timer 内 import batch.py 的 run_death_grip
+  Mac:
+    - gtg_timer.py 自包含 run_death_grip_timer
+    - 全部在 timer.py 一件里(_pop_doc + _pick_doc + _resync_pool +
+      Stage 1 调用 + Stage 2 重扫 + Stage 2 调用 = 6 个 v1101.4 标记)
+
+============================================================
+十、信用分 + 头条首发(v1101 + v1101.3 hotfix)
+============================================================
+【10.1 信用分检测】
+  JS 抓 .credit-score 等元素
+  数值 < 60 → 一次命中立即放弃 + 写硬终止
+
+【10.2 头条首发自动勾选/取消逻辑】
+  ┌─────────────────┬──────────┬────────────────┐
+  │ 信用分          │ 不首发表 │ 行为           │
+  ├─────────────────┼──────────┼────────────────┤
+  │ ≥ 95            │ 不在     │ 自动勾选首发   │
+  │ ≥ 95            │ 在       │ 取消勾选       │
+  │ < 95            │ 任意     │ 取消勾选       │
+  │ < 60            │ —        │ 硬终止         │
+  └─────────────────┴──────────┴────────────────┘
+
+【10.3 v1101.3 hotfix(头条首发"取消勾选"假动作)】
+  Bug: should_first=False 时执行的"取消勾选"是空点 — JS 返的是
+       "头条首发"四个字 textNode 的 boundingClientRect 中心,不是
+       复选框 input 的真坐标。win32 真鼠标点到文字上,cb.checked 不变;
+       脚本却照打"头条首发: 取消勾选 (sx,sy)"看着每次都成功,实际一次没切换。
+  影响:首发审核审到非原创每篇扣 5 分,9 次累计扣 45 分(100→55),
+        触发 <60 硬终止 + 群体性号信用分下滑。
+  修法:取真复选框 input 坐标(querySelector 'input[type=checkbox]'
+        boundingClientRect),win32 click 后 cb.checked 回读校验,
+        失败重试 3 次。三大件 win/ 同段统一 patch。
+
+============================================================
+十一、阅读量回查 + 高阅读告警(v1101)
+============================================================
+【11.1 发文成功后回查最近 3 篇】
+  导航到数据概览页 → JS 抓最近 3 篇阅读量
+  log: 阅读量: [N1, N2, N3]
+
+【11.2 高阅读量提醒(≥ 5000)】
+  任一阅读量 ≥ 5000 → 写"高阅读量提醒.txt"
+  文件每天累积(run_reports/<日期>/)
+
+============================================================
+十二、5 机部署详解
+============================================================
+【12.1 Win 台机部署】
+  位置:    C:\Users\kench\Desktop\台机专用自动发布\
+  3 件子目录:
+    - 微头条自动发布/    gtg_batch.py + go.bat
+    - 文章自动发布/      gtg_batch.py + go.bat
+    - 文章定时自动发布/  gtg_timer.py + gtg_batch.py + go.bat
+  Python 解释器: 系统 python(Python 3.x)
+  代理: v2rayN(头条 DIRECT,SOCKS 1080)
+  键盘鼠标: pywin32 win32api SendInput
+
+【12.2 4 Mac 部署(同款)】
+  位置:    ~/Desktop/<件名>/
+  3 件子目录:
+    - 微头条自动发布/    gtg_batch.py + go.command
+    - 文章自动发布/      gtg_batch.py + go.command
+    - 文章定时自动发布/  gtg_timer.py + go.command
+  Python 解释器: python3(Python 3.x,Apple silicon 用 brew 装)
+  代理: Shadowrocket(头条 DIRECT,Tailscale 100.64/10 必放行)
+  键盘鼠标: cliclick(brew install cliclick)
+  守护: ~/keep_canned_top_v2.sh(发文期罐头前台守护)
+
+【12.3 跨机救援命令模板】
+  SSH 进任一 Mac:
+    ssh kenchoiXXX@100.x.x.x
+
+  停发文进程:
+    pkill -f gtg_batch / pkill -f gtg_timer
+
+  停守护:
+    pkill -f keep_canned_top
+
+  跑 catchup:
+    cd ~/Desktop/<件名>/ && python3 catchup.py
+
+  重启 go:
+    cd ~/Desktop/<件名>/ && bash go.command
+
+  实测启动 + 起跑(后台运行 + 抓首篇 OK):
+    ssh kenchoiXXX@100.x \
+      'cd ~/Desktop/<件名> && nohup bash go.command > /tmp/gtg.log 2>&1 &'
+
+【12.4 罐头(创作罐头)】
+  - 5 机各自登录罐头(账号配置.xlsx 决定该机跑哪些)
+  - 罐头 CDP 监听端口默认 9223(可能动态变化,find_port() 函数读 ps)
+  - 罐头进程名: 创作罐头(Mac)/ canned 类(Win)
+  - 跨机不同步罐头登录状态,各机独立
+
+【12.5 启动顺序(细节)】
+  早晨缺哥手动:
+    1. 各机开机(Win 自启,Mac 上盖唤醒)
+    2. Tailscale + 网络通(看 menubar)
+    3. 罐头打开(每机 1 个实例)
+    4. v2rayN/Shadowrocket 启动 + 头条 DIRECT
+    5. (可选)cd 件目录 + python3 catchup.py(若昨晚有中断)
+    6. 双击 go.command/go.bat 启动发文
+    7. 守护 keep_canned_top_v2.sh 跑(Mac 已自启)
+
+============================================================
+十三、版本演进(v1101 → v1102.2 时间线)
+============================================================
+v1101    (2026-04-28): 基线版
+  - 三大件 + sheet 体系
+  - 死磕 + 篇间等待 8-20s
+  - cliclick / win32api 真鼠标点击
+  - ensure_gtg_top + AXRaise
+  - 4 类硬终止
+  - 信用分 + 头条首发自动勾选
+  - 阅读量回查 + 高阅读告警
+  - 文档导入弹窗 3 次重试
+
+v1101.1  (2026-04-28 下午): 熔断重构
+  - 取消 consecutive_fail 6 连败熔断
+  - 改为账号级分类处理(失登/封禁/普通失败 各自重试节奏)
+  - Stage 2 退出条件 = 仅 quota 全满
+
+v1101.2  (2026-04-29 凌晨): 末位账号 CDP 注入
+  - scroll_find_account 搜索框 fallback 用 CDP JS 注入
+  - Object.getOwnPropertyDescriptor + setter.call + dispatchEvent
+  - 取消对 osascript keystroke 的依赖
+  - find_or_reopen_webview L2 兜底全队同步
+
+v1101.3  (2026-04-29): 头条首发"取消勾选"假动作 hotfix
+  - 真坐标修复(querySelector 'input[type=checkbox]')
+  - cb.checked 回读校验,失败重试 3 次
+  - keep_canned_top.sh hotfix#2(Finder 兜底守护)
+
+v1101.4  (2026-05-01): doc_pool 实时校验 + Stage 1 中断恢复
+  - _pop_doc 抢救分发后失效引用
+  - _resync_pool 大循环开头重扫池
+  - _pick_doc 校验存在 + 失效就地剔除
+  - 文章定时 Stage 1 全员中断恢复
+
+v1101.5  (2026-05-02): catchup.py 独立脚本
+  - 主线零内部控制 + catchup.py 用户主动跑
+  - 诞生于 04:09 电信断网事件(394 误判硬终止)
+  - 4 步内核:读 log → 算漏数 → 环形重排 → 写白名单
+
+v1101.6  (2026-05-03): check_system_notice 优化
+  - 时间窗 4 keys → 2 keys
+  - 内容全文不截断
+  - 频道切换 sleep 1.5 → 2.5s
+  - notice_checked_set 内存缓存(每账号当天读 1 次)
+
+v1102 主线内化中断恢复 (2026-05-04 凌晨): 架构反转 v1101.5
+  - 「本轮已发」 sheet 加 count 列
+  - sheet 累积到大循环末才 clear
+  - 每次 publish → count += 1
+  - 启动读 sheet 重建 acc_count
+  - quota = (已发 + 池剩) // 账号
+
+v1102 NOTICE 重建 (2026-05-04 中): selector 失效紧急修
+  - 旧 span.name → 新 .conversation-box.notify-im-user-item
+  - 时间窗 1 → 2 天
+  - 内容按日期行切分
+  - 双频道读(系统 + 审核)
+  - notice_checked.txt 持久化
+
+v1102.1  (2026-05-04 中): catchup 接续 hotfix
+  - 主循环按白名单顺序重排 accounts
+  - 否则 catchup 写白名单白搭
+
+v1102.2  (2026-05-04 晚): 主线主控 v2 — 精确接续
+  - last_published.txt 持久化最近 publish 账号
+  - main 启动按 publish 时间序找中断点 + 1
+  - 真"按版本说明 line 632 从中断处起"
+
+============================================================
+十四、用户操作三铁律
+============================================================
+【14.1 推稿铁律(2026-05-04 NEO 470 篇丢失事故强化)】
+  核心: scp 是 cp,不是 mv → 推送 → ssh 远端确认数对 → 才 rm 源
+
+  禁忌(违反 = 数据丢失风险):
+    - ✗ scp 完成后假设源被删
+    - ✗ 用 pipe 命令 exit code 判断成功(`tar | ssh "tar -xzf"` 即使
+        包是空的也 exit 0)
+    - ✗ tar --include 跨 GNU/BSD 不一致(可能生成空包)
+
+  正解(每次推稿必走):
+    1. 源池 mv 到 stage(中转目录)
+    2. scp/tar 推到目标机
+    3. ssh 远端 ls *.docx | wc -l 实查 = 推送数
+    4. **数字对账匹配** 才 rm 源(不准用 wildcard,显式列文件)
+    5. 检查清单: find <源> -maxdepth 1 -name '*.docx' | wc -l = 0
+
+  推稿模板:
+    tar -czf - -C "$SRC" . | ssh kenchoiXXX@100.x \
+      "cd $TGT && tar -xzf - && ls *.docx | wc -l"
+    # ↑ 看输出 == 预期推送数,才 rm 源
+    cd "$SRC" && rm 显式文件1.docx 显式文件2.docx ...
+
+【14.2 跨机标题查重防类同(防风控)】
+  风险: 4 Mac 同期发文,标题相似 → 平台扣分(类同认定)
+  防范:
+    1. 推稿前用 sed 提取标题主体(去 NNN 编号 + 时间戳):
+       sed -E 's/^[0-9]+_[0-9.]+_//; s/_[0-9]{14}\.docx$//'
+    2. 跨机 comm -12 看是否有同标题
+    3. 有同标题 = 跨机内容可能重复,触发风控
+    4. 类同扣分 ≈ 50 信用分/篇,严重
+
+【14.3 推前确认目标路径(2026-04-30 实证)】
+  正确目标: ~/Desktop/<件名>/素材/(件子目录)
+  ✗ 错误别名:~/Desktop/自动微头条素材/(顶级,代码不读)
+
+  推前必做:
+    grep -nE "DOCS_FOLDER|SOURCE|BASE_DIR" 大件/gtg_*.py
+  确认代码读的真实路径,别凭直觉选目录
+
+============================================================
+十五、不动红线(架构 / 操作 / 决策)
+============================================================
+【15.1 架构层】
+  ✗ 不允许换 cliclick / win32api 为 CDP click()(反风控冗余)
+  ✗ 不允许压缩篇间等待 8-20s(反限流底线)
+  ✗ 不允许去掉 ensure_gtg_top 三件套(罐头前台保证)
+  ✗ 不允许动 Phase A/B/C/D/E 死磕循环节奏
+  ✗ 不允许动 4 类硬终止判定边界
+  ✗ 不允许批量 JS 切号绕罐头侧栏切换节奏(反风控)
+
+【15.2 操作层】
+  ✗ 不允许改头条首发取消勾选行为(v1101.3 hotfix 已修)
+  ✗ 不允许动 kill_v2(Win 台机:杀 v2rayN/xray = 自断 Anthropic 通道)
+  ✗ 不允许动 4 mac 罐头登录状态(各机独立)
+
+【15.3 用户决策层】
+  ✗ 不允许同步「永久跳过」 sheet(用户手填,3 件不同有意,脚本只读)
+  ✗ 不允许清空「硬终止账号」 sheet(失登/封号/禁言不该重排)
+  ✗ 不允许凭印象判业务字段(改字段/sheet 前必先 grep 代码引用)
+
+============================================================
+十六、运维 + 验证流程
+============================================================
+【16.1 改版 7 步工作流(2026-05-01 缺哥拍)】
+  顺序卡死,不可跳:
+    1. 写故障说明 → 仓库 故障日志.txt
+    2. 写版本说明 → 仓库 版本说明.txt(版本号缺哥定)
+    3. 写代码 → 改的人所在机的桌面真版(改前 .bak)
+    4. 本地验证(py_compile + 跑测)
+    5. 同步传仓库(cp 桌面 → 仓库 → push)
+    6. 同步其他 4 台 Mac(各 Mac Claude 拉仓库后自己落,Win 不跨机改)
+    7. 全机版本验证(.bak 时间戳 + grep patch 标记 + md5,不靠嘴皮)
+
+  铁律:
+    - 每步开始前等缺哥确认(具体动作开始前先讲一句,等点头)
+    - 接"改 v110X.Y" 指令第一句先复述 7 步
+    - 跨步出问题立即停 + 报情况,不静默修复
+
+【16.2 每发版必归档(2026-05-03 缺哥定)】
+  改版 7 步之后第 8 步:
+    cp Mac+Win 真版到 自动发布/<件名>VXXXX.X版/
+    立刻 push,不积攒
+  本次 V1102.2 归档位置:
+    自动发布/自动发布V1102.2/<件名>V1102.2/{mac,win}/
+
+【16.3 验证标准】
+  ❌ 不够: py_compile + grep -c 标记数 ≥ N(数量对不代表内容对)
+  ✅ 必须: 逐 step grep 落地证据
+    - os.path.exists(file)
+    - with open(...,"a")
+    - 恢复 X 个已检查账号
+    每个 step 全过才算 patched
+  ✅ 必须: 端到端实测一轮
+    - 跑 1 个账号
+    - 看 run_reports/<日期>/<新文件>.txt 真生成
+    - 看 log 出现"中断处自动接续:..."等关键词
+    - 看下次重启 set 真恢复 + 跳过
+
+【16.4 声明前先实证(2026-04-30 强化)】
+  涉及"已完成 / 全推完 / 同款 / 一致 / 完整"等结论前:
+    ❌ 不准: 先嘴皮承诺再补实证
+    ✅ 必须: 先实证 + 贴数据 + 再下结论
+
+  实证套路:
+    - 跨机版本声明 → ssh 各机 grep + md5 + 关键 patch 词命中数,做表格
+    - scp/推送声明 → 推完 ssh 目标机 ls + wc -l 拿实际落地数,跟源 N 对比
+    - 路径配置声明 → grep 代码里 SOURCE / DOCS_FOLDER / BASE_DIR 实际指向
+    - 复用关系声明 → 看 import 行确认是不是 wrapper / 共享逻辑
+
+  禁用措辞(没实证不准说):
+    "全部 / 都 / 齐了 / 一致 / 同款 / 已完成 / 是 v1101.X / 已经升级了"
+  紧贴一行实证脚注: "(实证: 4 机 × 3 件 md5 列表见上)"
+
+【16.5 桌面是真版,仓库是镜像(2026-05-04 强化)】
+  Win 台机三大件实际跑在 ~/Desktop/台机专用自动发布/
+  改动顺序:
+    1. 先改桌面真版 → 跑验证 → cp 仓库 → push
+    2. 反向(改仓库 → cp 桌面)死,会出错
+
+【16.6 5 机即时推云(每改必推 / 每创必推 / 不存散文件)】
+  5 机统一,任何修改/新建立即 git push
+  唯一权威 = 云端 origin
+  桌面/Documents 散文件零容忍(非生产代码不存桌面)
+
+【16.7 大记忆术同步规则(2026-05-03 缺哥定)】
+  本地 memory 每改必同步:
+    cp 到 大记忆术/win台机/
+    + push
+  5 机各自管理自己的 memory(不互相覆盖)
+
+============================================================
+十七、素材筛选规则
+============================================================
+【17.1 罐头爆款下载流程】
+  触发词: 「下载爆款」(口令)
+  执行机: Win 台机
+  流程:
+    cd 罐头爆款下载/
+    python 罐头爆款下载.py
+  前提: CDP 9223 在线
+  领域: 19 个(2026-05-02 删法律 + 加综艺;科学科技整体不要)
+
+【17.2 素材筛选流水线节奏】
+  罐头 ~2000 → v0 词典自动筛 → Claude 二筛(15 类)→ 缺哥三筛 ≈ 1500/批
+  一天用 1500/批,需每日再下补充
+
+【17.3 删除集 15 类规则(A-O,基于实际删除集 diff 学到)】
+  A. 极短/视频引子/无正文(< 50 字 + 疑问语气 + 无新闻事实)
+  B. 同一新闻多版本(只留最佳一条)
+  C. 涉外政治诅咒/嘲讽(实名外国领导人 + 诅咒/羞辱/嘲讽词)
+  D. 涉日反日情绪化(反日民族主义叙事/反西方民族主义叙事)
+  E. 抗战/革命历史军事(19XX 年 + 红军/八路军/志愿军/抗美援朝等)
+  F. 性犯罪/不雅/婚恋撕逼(性 + 暴力 + 黑话三角)
+  G. 实名网红/明星八卦/吐槽(实名公众人物 + 健康/家事/职场)
+  H. 财经/楼市/股市/价格预测(暴涨/暴跌/血崩/抄底/腰斩 + 情绪词)
+  I. 实名医院/官员反腐细节(实名 + 涉案金额/年限/家庭情节)
+  J. 玄学+真实死亡/疾病/灾难归因
+  K. 极端事故/虐待动物/猎奇(详细描述受害情节)
+  L. 性器官/性功能/性健康话题(医学描写但内容低俗化)
+  M. 政治局动向/涉外阴谋论(中央高层会议解读/反美反西方阴谋论)
+  N. 自杀/拐卖/性产业纠纷(结构性悲剧)
+  O. 给功臣/科学家/院士泼脏水阴谋论(实名院士/将军/革命领袖)
+
+  P. 法律(整个领域全删,2026-05-02 缺哥拍 — 罐头爆款下载界面直接剔)
+  Q. 科学科技(整个领域全删)
+
+【17.4 误杀回收闭环(2026-05-03 增补)】
+  缺哥从 Claude 剔除集挑回 ~136 条标红 → 纠偏放宽以下边界:
+    ✅ 国际政治/外交新闻报道(强烈保留,只删真正的脏话/阴谋论)
+    ✅ 房地产城市楼市分析(特定城市/小区数据/分析报告留)
+    ✅ 健康常识(非性,非诅咒)
+    ✅ 台海/反台独评论(主流舆论方向留)
+
+  关键区分:
+    - "特朗普暴跳如雷" = 新闻动词,留
+    - "祝特朗普下次得高玩癌" = 诅咒,删
+    - 国际政治默认留,只对真正的脏话/阴谋论才删
+
+【17.5 两轮筛选协作】
+  Claude 第一轮 — 按黑名单粗筛 + 列出剔除原因
+  缺哥第二轮 — 精挑(从 Claude 剔除集挑回误杀)
+  边界模糊倾向剔除(让缺哥决定回收)
+
+============================================================
+十八、用户主动操作出口(Escape Hatches)
+============================================================
+【18.1 中断不想接续 → 清 sheet】
+  场景:换素材池 / 换发文计划 / 怀疑数据脏 / 重新分配
+  操作:进 账号配置.xlsx 清空相关 sheet:
+    - 「白名单」清空 → 主线动态从罐头侧边栏拿全账号
+    - 「本轮已发」清空 → acc_count 全 0 → 跑完整大循环
+    - 「待补漏」清空(可选)
+    - 「失败列表」清空(可选)
+    - 「硬终止账号」**保留**(失登/封号/禁言不该重排)
+  主线启动 → sheet 全空 → 自然进入"全新开跑"模式,无需改代码
+
+【18.2 关闭进程】
+  Mac: pkill -f gtg_batch / pkill -f gtg_timer
+  Win: 任务管理器 → python.exe end task / Ctrl+C
+
+【18.3 跨日清重启】
+  日期切换后 run_reports/<新日期>/ 是新空目录 → notice_checked.txt
+  + last_published.txt 都从 0 开始,新一天新计数
+
+============================================================
+十九、故障预案(常见场景应对)
+============================================================
+【19.1 网断 → Stage 1 误判硬终止】
+  现象: gtg_timer.py "侧边栏未找到"硬终止潮(实际是网断,
+        webview partition 找不到)
+  应对:
+    1. 立即 pkill timer + 看 ping 能不能通
+    2. 网通后跑 catchup.py(读「待补漏」+ log 反推)
+    3. 重启 timer / batch
+  历史案例: 2026-05-02 04:09 电信断网,394 账号误判,催生 catchup.py
+
+【19.2 罐头退出 / 不在前台】
+  现象: cliclick 物理点击落空 / "P5 frontmost 不是罐头"
+  应对:
+    1. SetForegroundWindow + 重坐标 + cliclick 第 2/3 次
+    2. 仍失败 → 写"X 发布失败:文档导入弹窗未出现"
+    3. 进 Phase B 补发或下小轮重试
+  长期: keep_canned_top_v2.sh 守护(防罐头被切走)
+
+【19.3 跨夜 timer 中断】
+  现象: timer 23:49 启动,跑到次日凌晨,RUN_REPORT_DIR 仍是前日
+  应对:
+    1. 跨天后所有日志都追加到前日,「失败记录.xlsx」预期路径不存在
+    2. 修法: RUN_REPORT_DIR 改为每次写文件按 datetime.now() 算(惰性)
+    3. 当前: 用户每天首启动重置(走 _init_run_dir)
+  待修: memory 「待修清单 ①」,大版本
+
+【19.4 信用分 < 60 群体性下滑】
+  现象: 群发 9 篇后整批账号信用分 100 → 55,触发 <60 硬终止
+  根因(2026-04-29): 头条首发"取消勾选"假动作扣分(v1101.3 修)
+  应对:
+    1. 立即停发文 + 等信用恢复(平台一般 7-30 天)
+    2. 修代码层: v1101.3 hotfix 真坐标 + cb.checked 回读校验
+
+【19.5 cliclick 落空 / 罐头窗口太小】
+  现象: cliclick 物理点击坐标超出窗口边界
+  应对:
+    1. 缺哥手动最大化罐头窗口
+    2. 长期 TODO: 脚本启动前自动检测窗口超界
+  历史: 2026-04-29 11:30 neo2 实证
+
+【19.6 守护误抢前台(用户切窗被弹回罐头)】
+  现象: 用户切 Terminal/VS Code 1 秒内被弹回罐头
+  应对:
+    1. ssh 该机 ps aux | grep keep_canned_top
+    2. pkill -f keep_canned_top + 验证现象消失
+    3. 加白名单 + 防抖 (v2)
+  铁律: 部署多次时务必先 pkill,严禁 v1/v2 叠加
+
+【19.7 NOTICE selector 失效(平台 DOM 改版)】
+  现象: check_system_notice 调 N 次全空,实际有违规
+  应对:
+    1. 实测: CDP attach 罐头 webview → 手动跑 selector 看是否命中
+    2. DOM 改版 → 重写 selector(参 v1102 NOTICE 重建)
+    3. 持久化文件 notice_checked.txt 保证不重读
+
+【19.8 v2 算法历史债 — 第一次启动需手动注入 last_published.txt】
+  现象: v1102.2 patch 首次落地,前进程没写 last_published.txt
+  应对:
+    1. 看 log 找最近 OK 发布账号 + 时间戳
+    2. echo "账号|时间戳" > run_reports/<日期>/last_published.txt
+    3. 重启 → v2 算法读到 → 正确接续
+  之后每次 publish 自动写,不再需要手动
+
+============================================================
+二十、附录
+============================================================
+【附 A:memory 索引(关键条目)】
+  - project_发文上限与补漏规则
+  - project_机器拓扑(5 台)
+  - project_账号配置sheet_权属
+  - project_定时发布两阶段
+  - project_catchup_中断恢复
+  - project_AI洗稿骗补案_警示
+  - feedback_真鼠标点击_勿换CDP(架构红线)
+  - feedback_篇间等待_反限流底线(架构红线)
+  - feedback_文稿分发只存一(铁律)
+  - feedback_素材推送目标路径(铁律)
+  - feedback_声明前先实证(纪律)
+  - feedback_用上你的记忆(元规则)
+  - feedback_改版工作流(7 步)
+  - feedback_每发版必归档
+  - feedback_删除集学到的11类规则(15 类)
+  - feedback_keep_canned_top抢前台(守护)
+  - reference_角色代号(5 机角色)
+  - reference_SSH用户名规律(neo = kenchoios 1 个 i)
+  - reference_统一密码(geng7997)
+  - reference_4mac真版位置
+  - reference_Tailscale网络
+  - reference_Shadowrocket_Tailscale_bypass
+
+【附 B:仓库索引】
+  根目录:
+    版本说明.txt          (老版,v1101 → v1102.2 时间线)
+    故障日志.txt          (跨机错误日志,共享)
+    README.md             (仓库说明)
+    外出远端操控说明.txt
+    keep_canned_top_v2.sh (守护脚本)
+    .gitignore
+
+  自动发布/:
+    工具/                 (catchup.py + 各代 patch script)
+    各 101.X版/{mac,win}/ (历史版)
+    1102.1版/{mac,win}/   (上版本)
+    自动发布V1102.2/      (本次新结构)
+      ├─ 微头条自动发布V1102.2/{mac,win}/
+      ├─ 文章自动发布V1102.2/{mac,win}/
+      ├─ 文章定时自动发布V1102.2/{mac,win}/
+      └─ V1102.2版本说明.txt  (本文件)
+
+  shared_memory/:         (共享 memory 真版,5 机同步)
+  MAC数据/:               (4 Mac 仓库子目录)
+  win台机/:               (Win 台机本地工作目录)
+
+【附 C:关键文件 / 脚本完整路径(Win 台机视角)】
+  Win 真版:
+    C:\Users\kench\Desktop\台机专用自动发布\<件名>\gtg_batch.py(或 gtg_timer.py)
+  Mac 真版:
+    ~/Desktop/<件名>/gtg_batch.py(或 gtg_timer.py)
+  Win 仓库本地:
+    C:\Users\kench\code\头条自动发布\
+  仓库 origin:
+    https://github.com/kenchoi88/toutiao-auto-publish
+
+【附 D:常用 Bash 命令模板】
+  # 5 机批量 grep 某 patch 标记
+  for HOST in kenchoimini@100.70.22.7 kenchoios@100.68.57.96 \
+              kenchoineo2@100.96.153.17 kenair@100.114.112.10; do
+      echo "=== $HOST ==="
+      ssh "$HOST" "grep -c 'v1102' ~/Desktop/微头条自动发布/gtg_batch.py"
+  done
+
+  # 跨机 scp + 验证
+  scp "$LOCAL_FILE" "$HOST:$REMOTE_PATH"
+  ssh "$HOST" "ls -la $REMOTE_PATH && md5 $REMOTE_PATH"
+
+  # py_compile 5 机
+  for HOST in ...; do
+      ssh "$HOST" "python3 -m py_compile ~/Desktop/<件名>/gtg_batch.py && echo OK"
+  done
+
+  # 实测 last_published.txt 是否真生成
+  ssh "$HOST" "ls -la ~/Desktop/<件名>/运行报告/$(date +%Y%m%d)/last_published.txt"
+
+============================================================
+本版责任人:    绣虎(崔巉,Win 台机)
+本版落地时间:  2026-05-04 23:30 ~ 2026-05-05 00:30
+最末更新:      2026-05-05 00:30
+下版规划:      v1103 — 标签筛选 CDP 自动化(待并入)
+============================================================
