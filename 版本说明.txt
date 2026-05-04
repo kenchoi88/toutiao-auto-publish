@@ -600,9 +600,7 @@ v1101.6 — 2026-05-03(check_system_notice 优化:每账号当天读 1 次 + 完
   失败记录.xlsx / 高阅读提醒.txt 不动。
 
 【落地】
-  ☐ Win 台机微头条 — 已 patch(2026-05-03 17:??)
-  ☐ Win 台机文章 / 文章定时 — 待 patch
-  ☐ 4 Mac 各件 — 待 scp 推送
+  ✅ 全 5 机 × 各件已被 v1102 NOTICE 重建覆盖(2026-05-04),v1101.6 不再单独维护
 
 ============================================================
 
@@ -686,10 +684,107 @@ v1102 — 2026-05-04(主线内化中断恢复 · 大版本反转)
   - 数学正确,后续验证 quota 不超
 
 【落地】
-  ☐ 故障说明 + 版本说明 + 记忆 ✓ 已写
-  ☐ 代码(batch / timer 改动) — 等缺哥点头开干
-  ☐ 仓库 push
-  ☐ 4 Mac scp + 远程 patch
-  ☐ 全机验证
+  ✅ 故障说明 + 版本说明 + 记忆 已写
+  ✅ 代码(batch / timer 改动) 落地 5 机 × 3 件(commit 2e8a108)
+  ✅ 仓库 push 完成
+
+============================================================
+
+
+============================================================
+v1102 NOTICE 重建 — 2026-05-04(check_system_notice 抓不到 + 持久化补丁)
+============================================================
+  v1102 大版本主线内化已落地后,生产实测发现 NOTICE 抓取彻底失效 → 加 NOTICE 子改动。
+  与"主线内化中断恢复"独立,但同走 v1102 标记。
+
+【背景 / 触发】
+  2026-05-04 09:30 Win 台机文章定时跨夜失败潮 + check_system_notice 调 37 次全空。
+  CDP attach 实测「番茄爱吹东风 / 眼幕半度微涼」消息中心:
+    - 旧 selector `span.name` / `.chat-container-list` 头条改版后 DOM 已变,匹配 0 条
+    - 实际有违规通知(2 天内 7 条),全部漏掉
+
+【改动】
+  check_system_notice() 内部:
+    1. selector 换新:`.conversation-box.notify-im-user-item`(替代旧 `span.name`)
+    2. 时间窗:1 天 → 2 天(today + yesterday),covers 跨夜场景
+    3. 提取:`body.innerText` 按日期行切分(MM-DD HH:MM / YYYY-MM-DD / 昨日|今日 HH:MM)
+    4. 内容:全文不截断
+    5. 频道切换 sleep 1.5s → 2.5s,防 DOM 没渲染完
+    6. 不滚动(消息中心列表本身就够长)
+
+  持久化 NOTICE_CHECKED_FILE:
+    7. 全局变量 NOTICE_CHECKED_FILE = run_reports/notice_checked.txt
+    8. _init_run_dir 初始化路径
+    9. 主线 init 阶段:读 notice_checked.txt 恢复 notice_checked_set
+    10. 每次 check_system_notice 调用后,写一行 `账号|时间戳`
+    11. 中断重启后 set 自动恢复 → 当天不重读
+
+【范围】
+  5 机 × 3 件 = 15 个 .py:
+    Win 台机:微头条 / 文章 / 文章定时
+    AIR/MINI/NEO/NEO2:微头条 / 文章 / 文章定时
+
+【实证】
+  Win 台机文章定时改后实测:
+    - 「番茄爱吹东风」抓到 2 条违规
+    - 「眼幕半度微涼」抓到 5 条投诉
+    - 系统通知.txt + 违规提醒.txt 都正常落盘
+  4 Mac 重启后 grep -c v1102 全 ≥ 7,py_compile 全通
+
+【落地】
+  ✅ patch_v1102_batch.py / patch_v1102_batch_mac.py 推完 5 机 × 3 件
+  ✅ .bak_pre_v1102_<TS> 备份齐
+  ✅ 故障说明 + 版本说明已写
+  ✅ 代码归档:自动发布/{微头条,文章,文章定时}自动发布1102.1版/{mac,win}/
+
+============================================================
+
+
+============================================================
+v1102.1 — 2026-05-04(catchup 接续 hotfix · 主循环按白名单顺序重排)
+============================================================
+  小版本 hotfix。v1102 推完后 Win 台机微头条重启验证发现接续失败,临时补。
+
+【背景】
+  v1101.5 catchup.py 写白名单是「环形重排」(断点账号置首,其余顺序回卷),
+  目的:让主线启动后从断点账号开始跑。
+
+  但主线 gtg_batch.py 加载白名单时只「过滤」accounts:
+    accounts = [a for a in accounts if any(wn in a or a in wn for wn in wl_map)]
+  过滤后顺序仍是 accounts 的原顺序(不是白名单顺序)→ 主线从原顺序首位起跑,
+  不从断点起跑 = catchup 白搭。
+
+【症状】
+  Win 台机微头条:catchup 算断点 = 「被月亮收买」(应起点),实际从「绿野枝」起跑。
+
+【修法】
+  白名单加载段改成「过滤 + 按白名单顺序重排」:
+    _orig_accounts = list(accounts)
+    _new_accounts = []
+    _seen = set()
+    for wn, _wq in whitelist_with_q:    # Win = whitelist_with_q,Mac = _wl_q
+        for a in _orig_accounts:
+            if a not in _seen and (wn in a or a in wn):
+                _new_accounts.append(a)
+                _seen.add(a)
+                break
+    accounts = _new_accounts
+    log("...过滤+重排后剩 {len(accounts)} 个账号(首位={accounts[0]})")
+
+【范围】
+  Win 3 件(微头条/文章/文章定时)+ 4 Mac × 微头条 = 7 件
+  Mac 文章件白名单加载段架构不同(无 whitelist_with_q / _wl_q 段),不需 hotfix。
+
+【实证】
+  Win 台机微头条:从「被月亮收买」接续 ✓
+  mini  微头条:从「时间煮雨」接续 ✓
+  neo2  微头条:从「文艺伊迪」接续 ✓
+  neo   微头条:第 1 次 catchup → 「满身柔骨」(items[89])接续,跑 5 篇,
+              第 2 次 catchup 起点自动前移到「极度嚣张」(items[0])= 上断点账号已满
+  air   微头条:用户自验
+
+【落地】
+  ✅ patch_v1102.1_hotfix.py 推完 7 件 + .bak_pre_v1102_<TS2> 备份齐
+  ✅ 代码归档:自动发布/{微头条,文章,文章定时}自动发布1102.1版/{mac,win}/
 
 ============================================================
