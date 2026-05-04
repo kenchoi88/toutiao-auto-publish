@@ -1,4 +1,5 @@
 - ❗ [推版本必须全件实证再汇报 + 不叠版本号(V1102 为准)](feedback_推版本必须全验证再汇报.md) — 推完贴 4 维表(件×标记×py_compile×实测)才算完;V1102 后不叠 .1/.2/.3,新功能写版本说明+memory(2026-05-05 v1102 三连推漏件爆雷)
+- ❗ [patch 完必清 .bak](feedback_patch完必清bak.md) — patch/clear/align/drop 验证通过后立刻删该轮 .bak + __pycache__ + ~$*,不积累(2026-05-05 缺哥怒「以前都没这么多东西,越来越多」)
 - ❗ [Shadowrocket 按域名分流测出口](reference_shadowrocket_按域名分流测出口.md) — ipinfo 出口 ≠ 头条出口;判走代理用 TLS RTT 50-110ms 国内 / 1000ms+ 国外,别凭 ipinfo / route get(2026-05-02 阿良教训)
 - ❗ [中断恢复 catchup.py — 缺 N 补 N](project_catchup_中断恢复.md) — 三大件中断后 cd 件目录 → python3 catchup.py → go.command,3 步搞定;数据来源「待补漏」sheet 或 log;依赖 gtg_batch v1101.5+(2026-05-02)
 - ❗ [用上你的记忆 — 元规则](feedback_用上你的记忆.md) — 50+ 条已立,问题从不是规矩不够是不用;接任务第一动作 grep+Read 对照,出问题先反思旧规矩别立新条(2026-05-01 缺哥拍)
