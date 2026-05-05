@@ -1,4 +1,5 @@
 - ❗ [推版本必须全件实证再汇报 + 不叠版本号(V1102 为准)](feedback_推版本必须全验证再汇报.md) — 推完贴 4 维表(件×标记×py_compile×实测)才算完;V1102 后不叠 .1/.2/.3,新功能写版本说明+memory(2026-05-05 v1102 三连推漏件爆雷)
+- ❗ [版本说明 / 故障说明 存放位置](feedback_版本说明故障说明存放位置.md) — 新版本说明放 自动发布/自动发布V<X>/V<X>版本说明.txt(跟版本号目录绑);故障说明 自动发布/故障说明/故障说明_YYYY-MM-DD.txt 当日独立 + 未修/已修分段;根 版本说明.txt 故障日志.txt 只留指针不再 append(2026-05-05 缺哥两纠)
 - ❗ [patch 完必清 .bak / 临时监听用完即删](feedback_patch完必清bak.md) — patch/clear/align 后必清 .bak+__pycache__+~$*;临时 hook/监听/cron/patch 脚本同款用完即拆,不囤积(2026-05-05)
 - ❗ [跨机 ssh 启脚本必须 login shell](feedback_跨机ssh必须login_shell.md) — ssh 远程起 python 一律 bash -lc / 显式 PATH,裸 ssh 起 non-interactive PATH 不含 brew,cliclick 找不到无声白跑(2026-05-05 NEO 5h 事故)
 - ❗ [Shadowrocket 按域名分流测出口](reference_shadowrocket_按域名分流测出口.md) — ipinfo 出口 ≠ 头条出口;判走代理用 TLS RTT 50-110ms 国内 / 1000ms+ 国外,别凭 ipinfo / route get(2026-05-02 阿良教训)
