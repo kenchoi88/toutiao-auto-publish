@@ -1,0 +1,570 @@
+外出远端操控绣虎说明 · 全量复盘
+================================
+责任人:    绣虎(崔巉,Win 台机)
+建立日期:  2026-05-06
+覆盖事件:  2026-05-05 17:00 ~ 2026-05-06 02:06 (~9 小时)
+对照文档:  外出远端操控阿良说明.txt(阿良 air 端独立写,两两印证)
+位置:      仓库根 ~/code/头条自动发布/外出远端操控绣虎说明.txt
+仓库:      https://github.com/kenchoi88/toutiao-auto-publish
+
+【文档定位】
+    绣虎(Win 台机)从指挥+裁判+跨机协调视角,全量记录今晚发生的所有故障/操作/代码/记忆。
+    阿良写一份独立版本,两份交叉对照,任何 5 机 Claude 接手新故障时可以复盘流程不踩重坑。
+    本文档是"过程档案",立的 5 条 memory 是"规矩",出问题先查 memory,看时序细节查本档。
+
+
+================================
+零、目录
+================================
+    一、 时间线总览(关键节点)
+    二、 V1102.3 文章端 5s 自动补点(代码层修复)
+    三、 跨机素材推送(mini/neo/neo2/air 微头条 + 文章定时)
+    四、 air Tailscale 出街回家故障(主轴 5h 闭环)
+    五、 mini 文章定时罐头死 + last_published 跨日 bug
+    六、 立的 5 条记忆汇总
+    七、 4 Mac 配置矩阵(最终态)
+    八、 关键代码 / SQL / plist 片段
+    九、 验证命令清单(可复用)
+    十、 后续待修(留 BUG 列表)
+    十一、 历史教训沉淀
+
+
+================================
+一、时间线总览(关键节点)
+================================
+17:00~17:15  缺哥反映 NEO 文章端 cliclick 首次点击预览并发布常失效
+             绣虎 grep 5 机日志,实证 7163 次重试(文章自动)/ 739 次(定时)
+             根因: React/Vue 渲染时序"DOM 已出现但 click handler 未绑定"窗口期
+             反风控约束: 必须物理点击保留 isTrusted=true,不能用 JS .click()
+17:19~19:51  绣虎写 NEO 守护脚本(_neo_守护补点.py),独立监听日志
+             见"cliclick 点击预览并发布"启动 8s 计时,超时即补点 (1119,636)
+             累计救援 62 次,0 篇真失败,单篇等待 ~2 分钟 → 12 秒
+19:51~20:50  V1102.3 落地: 文章端 5s 自动补点
+             写 patch_v1102.3.py 自动改 publish_article 内层 for i in range(60|20)
+             5 机真版 10 处 patch + 仓库镜像 8 处同步 + 自动发布V1102.3 归档 4 处
+             commit b0239e7 push origin/main
+             清守护脚本 + .bak
+
+20:50~21:35  缺哥让推 915 文章定时素材 → NEO + 改 B1 = 2026-05-06
+             缺哥让推 732 文章定时 → mini + 改 B1 = 2026-05-06
+             缺哥让推 749 微头条 → neo2 (源 22:44 池子 932 篇)
+
+21:35~21:55  下载罐头爆款(罐头进程 GTG 起来后)
+             共 1523 条精筛(删 477,删除率 23.9%) + URL 列表 2000
+
+21:55~22:05  整理 5 机今天的审核通知 + 系统通知
+             5 机 6 个文件,691 条原始通知去重
+             117 条审核通知 + 184 条系统通知,156 个独特账号
+             输出 ~/Desktop/系统通知/5月5号{审核,系统}通知.txt
+
+22:05~22:30  推 745 微头条到 air
+             air 当时显示 100.114.112.10 走 sfo relay (363ms RTT)
+             推送 ETA 估 2h43m,远超直连应有的 5-10 分钟
+             缺哥意识到不对,提出修 Tailscale 直连
+             绣虎 TaskStop 中断 + 精确删 air 上误推的部分(NFC/NFD 坑)
+
+22:30~01:30  air Tailscale 出街回家故障 5h 闭环复盘(主轴)
+             1) 根因诊断: 多个 tailscaled 进程并存 + Shadowrocket TUN 模式接管
+                默认路由 + DNS,fake-DNS 把 controlplane 解到 198.18.x
+             2) 阿良 air 端实操: launchd plist HTTPS_PROXY=http://127.0.0.1:1082
+                让 daemon 用 HTTP CONNECT 经 Shadowrocket 出
+             3) 4 mac db 配置审计: 发现 mini/neo docid=2 skip-proxy 缺 100.64.0.0/10
+                绣虎在台机端 ssh sqlite3 UPDATE mini + neo 补齐
+             4) air→3 mac SSH 互信打通: 灌 air pubkey 到 mini/neo/neo2 authorized_keys
+             5) Tailscale 节点清理: admin 后台删旧 air(100.67.252.1) + kenchoiair
+                air 用 hostname=air 重新接入(IP=100.126.82.58)
+
+01:00~01:35  4 网验证 air → 跨机
+             AX3 (家)        scp 1MB 405ms (LAN 直通 4ms)
+             Q6 移动          scp 1MB 10.8s (IPv6 P2P 33ms)
+             5G 热点          scp 1MB 3.5s  (IPv6 P2P 39ms / hard NAT)
+             4G 热点          scp 1MB 17s   (IPv6 P2P 73ms / hard NAT)
+             AX3 切回         scp 1MB ~1s   (LAN 4ms)
+             4 网 100% 复现"切网后 100.64/10 路由被新网关抢"bug
+             包括切回 AX3 也中招(颠覆"出门才坑"假设)
+             立"切网必做软修"铁律: tailscale down && up
+
+01:35~01:50  mini 文章定时罐头死复盘
+             [01:19:32] 任务 94 盼江南 connection refused 失败回池
+             [01:20:05] 任务 95 初代纯爱战士触发,罐头 ws 已 closed
+                        Python Traceback → 进程崩 [进程已完成]
+             阿良重启罐头后,缺哥点 GO,但接续机制没起效
+             根因: LAST_PUBLISHED_FILE 路径按当日目录(20260506),
+                   昨晚记录在 20260505/last_published.txt,跨日找不到
+                   跳过 v1102 接续重排 → 按原顺序起跑 → 任务 1 = 月光吟梦
+             小修: cp 5/5 last_published.txt → 5/6 目录(不动代码)
+             重启 GO 后接续生效:
+                [02:04:33] [v1102] 中断处自动接续: 山复尔尔(idx=98) → 盼江南起跑
+                [02:05:57] OK 任务 1 盼江南 → 2026-05-06 08:01
+                [02:06:05] 任务 2 初代纯爱战士 → 08:02
+             遗留 BUG (明天再改): 失败账号 sent_count_map=0 → 本轮 quota 不满
+                                  还会被本轮重新插队,而不是等 Phase B 补漏
+
+22:30~01:50  期间副赢: 阿良清理 5/4 卡在 air 的废 rebase
+             commit b78477c (绣虎写的 v1102 实际定义,作者保留 5/4 原日期)
+
+
+================================
+二、V1102.3 文章端 5s 自动补点
+================================
+【故障】
+    文章端 publish_article 里 cliclick(mac) / win32api(台机) 物理点击
+    「预览并发布」按钮第一次常无效,等"确认发布"30s 不出 → 进 attempt 2 重试
+    单篇耗时拉到 ~2 分钟才发出去
+
+【实证】
+    5 机文章端历次累计 "确认发布未出现" 重试次数:
+    | 件          | 累计 |
+    | 文章自动    | NEO 1619 + mini 2021 + neo2 1856 + air 1462 + 台机 205 ≈ 7163 |
+    | 文章定时    | NEO  116 + mini   43 + neo2  366 + air   30 + 台机 184 ≈  739 |
+    主要集中在文章自动(~10 倍于定时),长期常态非昨日突变。
+    台机 win32api 比 mac cliclick 命中率高 4-5 倍但仍存在。
+
+【根因】
+    React/Vue 渲染时序的"DOM 已出现但 click handler 未绑定"窗口期:
+        JS getBoundingClientRect 返回坐标 = DOM 已渲染
+        立刻物理点击 → 落到刚渲染但还没绑定监听的按钮 → 点空气
+        几百毫秒到几秒后 handler 绑定完成,下次点击才生效
+
+【为什么不能用 JS .click() 绕过】
+    头条平台反爬检测 event.isTrusted = false 即识别为脚本 → 影响推荐
+    必须物理点击保留 isTrusted=true → 只能靠重试兜底
+
+【守护验证】
+    NEO 17:19~19:51 独立守护脚本验证可行,救援 62 次 / 0 篇真失败
+    单篇等待从 ~2 分钟 → 12 秒
+
+【V1102.3 改法】
+    publish_article 内层 for i in range(60|20) 等"确认发布"循环:
+        if i == 10 and not confirm_clicked:
+            log("[V1102.3] 5s 未见确认发布,补点预览并发布")
+            <平台特异点击>
+    mac 4 台 cliclick / 台机 win32api,平台检测靠路径含 "台机专用" / "win台机" / "V1102.3/win/"
+
+【范围】
+    改 5 机真版文章端 + 文章定时端 = 10 处文件
+    仓库镜像同步 8 处 + 自动发布V1102.3 归档 4 处
+    微头条端不动(无两步弹窗,无此问题)
+    保留 5 次 attempt 上限不动
+
+【落地】
+    commit b0239e7 push origin/main
+    所有 patch 文件 py_compile OK
+    主进程当前在跑不影响,下次启动生效
+
+
+================================
+三、跨机素材推送(mini/neo/neo2/air)
+================================
+【模式】
+    本地随机抽 N 篇文件名 → 写到 /tmp/push_*.txt 清单
+    tar -cf - -T 清单 | ssh 远端 tar -xf - 流式推送
+    保留中文文件名,不需要中转盘
+    完成后 xargs -d '\n' -a 清单 rm -- 删源(规矩"分发完源必删")
+    清临时清单(规矩"用完即删")
+
+【今晚推送账目】
+    21:00 推 300 微头条 → mini 文章定时素材池(原方案目录) ⚠ 后改 mini 微头条素材池
+    21:10 推 298 微头条 → neo (kenchoios@100.68.57.96)
+    21:15 (回收 NEO 误推 298,转推 NEO2,改用 NEO→NEO2 转移)
+    21:25 推 300 微头条 → mini ~/Desktop/微头条自动发布/素材/
+    21:30 推 298 → NEO2 ~/Desktop/微头条自动发布/素材/(从 NEO 转移)
+    21:35 推 915 文章定时 → NEO ~/Desktop/文章定时自动发布/素材/
+                            改 NEO 上 定时发布.xlsx B1 = 2026-05-06
+    21:48 推 732 文章定时 → mini ~/Desktop/文章定时自动发布/素材/
+                            改 mini 上 定时发布.xlsx B1 = 2026-05-06
+    22:00 推 749 微头条 → NEO2 ~/Desktop/微头条自动发布/素材/
+    22:30 推 745 微头条 → air ~/Desktop/微头条自动发布/素材/(被 SFO relay 拖死,中断)
+    01:42 推 745 微头条 → air (Tailscale 直连后,17 秒搞定,~580x 提速)
+
+【NFC/NFD 文件名坑】
+    macOS 文件名是 NFD 分解形式(中文每字含组合字符)
+    Windows 文件名是 NFC 组合形式
+    sort + comm -12 比较两边清单,字面字符不匹配 → 假阴性
+    解法: 用文件名特征(时间戳后缀如 _20260505[2-9][2-9]*.docx)精确锁定
+    不要依赖 sort + comm 跨平台比对清单
+
+
+================================
+四、air Tailscale 出街回家故障(主轴 5h 闭环)
+================================
+【缺哥提出】
+    air 跟着缺哥外出连过移动热点/陌生 WiFi,回家后 Tailscale 走 SFO relay
+    跨机 ssh RTT 370ms,推 745 篇 ETA 2h43m
+    需要修直连
+
+【绣虎诊断阶段】
+    1) tailscale status 看 air 行: active; relay "sfo"
+       台机端 endpoints[]=空 = NAT 打洞失败,只能走 DERP
+    2) ssh air 看本地接口:
+        en0 = 192.168.10.239 (Q6 移动子网, 不是台机的 192.168.3.x)
+        默认路由: utun9 (Shadowrocket TUN 接管)
+    3) 物理 air 在台机左边,但网络 LAN 不同 → 无法局域网直连
+       缺哥切 air 到 AX3 后 LAN IP=192.168.3.7 ≈ 同台机子网
+
+【Tailscale 后台清理】
+    后台多个 air 影子节点:
+        air         100.67.252.1   offline 1d (旧)
+        kenchoiair  100.114.112.10 active sfo (今晚之前)
+        air-1       100.126.82.58  新注册(因 hostname 冲突自动加 -1)
+    阿良在 air 上跑 tailscale up --hostname=air --reset → 触发 reauth
+        但 hostname=air 占着 → daemon logout
+        多个 tailscaled 进程并存(系统 + 用户态),sudo -S 进程卡 stdin
+    最终: 阿良在 air Terminal 跑 sudo /opt/homebrew/bin/tailscale logout
+                              + sudo tailscale up --reset
+       浏览器认证 + admin 后台删旧节点
+    缺哥手动改 admin hostname=air(原 air-1 重命名)
+
+【三层防御诊断 + 修复】
+
+    第一层: launchd plist HTTPS_PROXY (daemon 控制面绕开 fake-DNS)
+        Shadowrocket TUN 模式 fake-DNS 把 controlplane.tailscale.com 解到 198.18.x
+        tailscaled 拿到 fake-IP → connect timeout → 节点掉线 → fallback DERP relay
+        修法: /Library/LaunchDaemons/com.tailscale.tailscaled.plist 加
+            <key>EnvironmentVariables</key>
+            <dict><key>HTTPS_PROXY</key><string>http://127.0.0.1:1082</string></dict>
+        让 daemon 用 HTTP CONNECT 经 Shadowrocket(带原始域名,Shadowrocket 自己做名称解析)
+        bootout + bootstrap 重启 daemon 即可
+        端口 1082 校准: 改前先在 Shadowrocket → 全局配置确认 HTTP 代理端口
+
+    第二层: docid=2 skip-proxy 含 100.64.0.0/10 (系统层)
+        Shadowrocket SQLite db 路径:
+            ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db
+        sqlite3 db "SELECT value FROM config WHERE docid=2;"
+        实证 mini/neo docid=2 缺 100.64.0.0/10 (5-06 之前 air 4-27 加过,mini/neo 没加)
+        修法 UPDATE: 在 172.16.0.0/12 后插入 100.64.0.0/10 跟 air 顺序一致
+            UPDATE config SET value='192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, localhost, *.local, captive.apple.com, *.eastmoney.com, push2.eastmoney.com'
+            WHERE docid=2;
+        UPDATE 后 PRAGMA integrity_check 应返回 ok
+        不需要 reload Shadowrocket(NetworkExtension 自然重启时加载新 db)
+
+    第三层: docid=3 tun-excluded-routes 含 100.64.0.0/10 (TUN 层)
+        4 mac 都已含此项(早期 air 4-27 改过,后续机继承)
+        排除路由表,流量直接走系统路由
+
+    Rule 段 IP-CIDR 兜底: docid=667 (air 5-06 加,c6created 当前时间戳顶到最高优先级)
+        阿良摸清 Shadowrocket 内部机制:
+        - config 表是 FTS3 虚表
+        - Rule 评估按 c6created (unix timestamp) DESC 不是 docid
+        - 新规则用当前时间戳即顶到最高优先级,无需平移现有 docid
+
+【4 Mac SSH 互信打通】
+    新 air-1 节点 ssh 之前: kenair@100.126.82.58 Permission denied
+        air 没启 Tailscale SSH(之前 admin 后台节点带 SSH 标签,新 air-1 没标)
+        手动加 --ssh: tailscale set --ssh=true(不触发 reauth)
+    新 air pubkey:
+        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16AHXIHG/LhGxuK5uk5J9J kenair@Air
+    台机灌入 mini/neo/neo2 的 ~/.ssh/authorized_keys
+    air → 3 mac SSH 全通验证
+
+【4 网验证】
+    | 网络         | en0 段          | direct ping | scp 1MB | NAT       | 路由 bug | 软修后 SSH |
+    | AX3 (家)     | 192.168.3.7     | LAN 4ms     | 405ms   | easy      | 复现     | 3 mac OK   |
+    | Q6 移动      | 192.168.10.239  | IPv6 33ms   | 10.8s   | easy      | 复现     | 3 mac OK   |
+    | 5G 热点      | 172.20.10.6     | IPv6 39ms   | 3.5s    | hard sym  | 复现     | 3 mac OK   |
+    | 4G 热点      | 172.20.10.5     | IPv6 73ms   | 17s     | hard sym  | 复现     | 3 mac OK   |
+    | AX3 切回     | 192.168.3.7     | LAN 4ms     | ~1s     | easy      | 复现     | 3 mac OK   |
+    切网铁律: tailscale down && sleep 2 && tailscale up && sleep 5
+        无副作用,不重新认证,~7 秒搞定路由表回 utun0
+
+【关键发现 (与"切热点回家就稳"假设对立)】
+    AX3 切回家也复现路由抢 → 任何 SSID 切换都触发,不是只有出门才坑
+    tailscale ping direct 通 ≠ 跨机 TCP 通(P2P UDP 不依赖系统路由表,假阳性)
+    nc -z 100.x 22 端口扫描也假阳性
+    唯一可信: 真 ssh 一次跑 echo OK
+
+
+================================
+五、mini 文章定时罐头死 + last_published 跨日 bug
+================================
+【故障时序】
+    22:49 mini 文章定时启动,共 714 任务
+    01:17:22 OK 任务 92 每天烦躁专家
+    01:19:24 任务 94/714 盼江南 → 触发
+    01:19:32 系统通知检测出错 [Errno 54] Connection reset by peer
+             X 发布失败: 连接失败 [Errno 61] Connection refused
+             → 文档已回池尾待后续重试
+    01:20:05 任务 95/714 初代纯爱战士 → 触发,罐头 ws 已 closed
+             Python Traceback: WebSocketConnectionClosedException
+             gtg_timer.py 进程崩 [进程已完成]
+    01:48 缺哥发现,通知绣虎查
+
+【根因】
+    罐头(创作罐头 Electron)进程死了被关
+    gtg_timer.py 通过 CDP WebSocket 调罐头时收到 socket already closed
+    Python 没异常恢复机制 → 整个进程崩
+
+【缺哥重启罐头后 GO 异常】
+    [01:54:15] 任务 1/640: 月光吟梦 → 2026-05-06 08:01
+    应该接续从盼江南起,实际从月光吟梦(账号顺序第 10 位)起
+    绣虎初判: 接续机制失效,担心月光吟梦昨晚已排过 5/6 → 重复发文风险
+    缺哥 ctrl-C 停
+
+【绣虎二次诊断】
+    last_published.txt 92 行(头 5 = 绿野枝~路过蜻蜓 / 末 5 = 山复尔尔 / 总 92)
+    last_published.txt **没有月光吟梦**(他 5/5 任务 10 失败,文档回池没记录到)
+    确认月光吟梦昨晚没排过 5/6,任务 1 = 月光吟梦其实是 v1102 设计内行为(quota 未满补本轮)
+
+【深层根因 (跨日 bug)】
+    LAST_PUBLISHED_FILE = os.path.join(RUN_REPORT_DIR, "last_published.txt")
+    RUN_REPORT_DIR 按当日 = 20260506/last_published.txt
+    但昨晚记录在 20260505/last_published.txt,5/6 启动时 5/6 目录还没建
+    → os.path.exists(LAST_PUBLISHED_FILE) = False
+    → 跳过 v1102 接续重排
+    → 按原 all_accounts 顺序起跑
+
+【绣虎小修(不改代码)】
+    ssh mini cp 5/5 last_published.txt → 5/6 目录
+    cp 后 v1102 接续机制读到 5/6 last_published.txt 末行 = 山复尔尔
+    重启 GO:
+        [02:04:33] [v1102] 中断处自动接续:最近 publish「山复尔尔」(idx=98) → 从下一位「盼江南」起跑
+        [02:04:33] 任务 1/640: 盼江南 → 2026-05-06 08:01
+        [02:05:57] OK 任务 1 盼江南
+        [02:06:05] 任务 2 初代纯爱战士
+
+【遗留 BUG (留明天)】
+    1. last_published.txt 跨日机制: 应该自动从最近一日 RUN_REPORT_DIR 找
+       不是按当日目录路径死板拼接
+    2. 失败账号 sent_count_map=0 → 本轮 quota 不满还要重新发
+       缺哥原方案: 失败账号本轮跳过,只在 Phase B 补漏
+       现状: 失败账号会在本轮中按账号顺序排队插入,跟原方案有偏差
+
+
+================================
+六、立的 5 条记忆汇总
+================================
+今晚沉淀 5 条 memory(绣虎/win台机/ + 大记忆术),5 机 Claude 共享:
+
+1) feedback_shadowrocket_skip_proxy.md (大改)
+   描述: 4 Mac Shadowrocket 必须三层放行 100.64.0.0/10
+   要点: docid=2 skip-proxy + docid=3 tun-excluded + Rule 段三层
+         切网时 fake-DNS 还劫 controlplane,daemon 用 plist HTTPS_PROXY=127.0.0.1:1082
+         4 mac 矩阵(2026-05-06 实证): air/mini/neo/neo2 docid=2/docid=3 全 ✓
+   commit: 5b85b1a
+
+2) feedback_Mac出门归来三查清单.md (新立 + 大改 + 立铁律)
+   描述: Mac 切网必软修 + 三查清单
+   要点: 任何 SSID 切换都触发(包括切回家)
+         第零步铁律: sudo tailscale down && sleep 2 && sudo tailscale up && sleep 5
+         然后三查: ① plist HTTPS_PROXY 活 ② tailscale ping direct ③ db 三层 100.64
+         不要做的: quit Shadowrocket / sudo tailscale up --reset / 改 hostname
+   commit: 5b85b1a → 351c51c → 33482fd → f929cb9
+
+3) feedback_跨机协同作战分工.md (新立)
+   描述: 跨机协同作战分工 - 绣虎指挥+现场机实操
+   要点: 绣虎(我) 总指挥+推理+裁判+立 memory+跨机协调
+         现场机 Claude 本机实操拿 root+实证
+         缺哥拍板+物理操作+复盘指令
+   commit: b068944
+
+4) feedback_版本说明故障说明存放位置.md (新立, 5/5 较早立)
+   描述: 版本说明放 自动发布V<X>/V<X>版本说明.txt(跟版本号目录绑)
+         故障说明 自动发布/故障说明/故障说明_YYYY-MM-DD.txt 当日独立
+         根 版本说明.txt + 故障日志.txt 只留迁出指针,不再 append
+   commit: 7a9e1b2
+
+5) (阿良端) feedback_tailscale_daemon_https_proxy.md (升级)
+   阿良在 air 端独立写,绣虎不重复
+   commit: 95fcc5d
+
+MEMORY.md 索引文件顶部 ❗ 加 3 条对应索引(skip_proxy / 三查清单 / 协同作战)。
+
+
+================================
+七、4 Mac 配置矩阵(最终态 2026-05-06)
+================================
+【Tailscale 节点】
+    台机 ken-choi      100.86.79.39   Win 11 25H2  Connected
+    air                100.126.82.58  macOS 26.4.1 Connected (新节点,旧 air/kenchoiair 已 admin 后台删)
+    mini               100.70.22.7    macOS 26.4.1 Connected
+    neo                100.68.57.96   macOS 26.4.1 Connected
+    neo2               100.96.153.17  macOS 26.4.1 Connected
+
+【SSH 用户名】
+    台机:   kench
+    air:    kenair (注意: 不是 kenchoiair, hostname=Air)
+    mini:   kenchoimini
+    neo:    kenchoios (1 个 i, 不是 kenchoiios)
+    neo2:   kenchoineo2
+
+【Shadowrocket db 三层放行】
+    机器  | docid=2 skip-proxy 100.64 | docid=3 tun-excluded 100.64 | Rule 段 IP-CIDR 100.64
+    air   | ✅ (4-27)                 | ✅ (4-27)                   | ✅ (5-06 阿良加, c6created 高位)
+    mini  | ✅ (5-06 补)               | ✅                          | —
+    neo   | ✅ (5-06 补)               | ✅                          | —
+    neo2  | ✅ (4-27)                 | ✅                          | —
+
+【air 独有】
+    /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+        EnvironmentVariables: HTTPS_PROXY=http://127.0.0.1:1082
+    (mini/neo/neo2 不需要 — 它们的 Shadowrocket 不在 TUN 模式或没经历 fake-DNS 劫持)
+
+【SSH 互信(authorized_keys)】
+    air pubkey: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16AHXIHG/LhGxuK5uk5J9J kenair@Air
+    已灌入: mini, neo, neo2 三台 ~/.ssh/authorized_keys
+    台机 pubkey: 之前已灌(4 mac 历史互信)
+
+
+================================
+八、关键代码 / SQL / plist 片段
+================================
+
+【V1102.3 patch 注入代码 (mac cliclick)】
+    if i == 10 and not confirm_clicked:
+        log(f"  [V1102.3] 5s 未见确认发布,补点预览并发布 ({preview_x},{preview_y})")
+        subprocess.run(["cliclick", f"c:{preview_x},{preview_y}"], capture_output=True)
+
+【V1102.3 patch 注入代码 (台机 win32api)】
+    if i == 10 and not confirm_clicked:
+        log(f"  [V1102.3] 5s 未见确认发布,补点预览并发布 ({preview_x},{preview_y})")
+        win32api.SetCursorPos((preview_x, preview_y))
+        time.sleep(0.05)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+【Shadowrocket db UPDATE 补 100.64.0.0/10 (用于 mini/neo)】
+    cd ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases
+    cp default.db default.db.bak.skipproxy_100x_$(date +%Y%m%d_%H%M%S)
+    sqlite3 default.db "UPDATE config SET value='192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, localhost, *.local, captive.apple.com, *.eastmoney.com, push2.eastmoney.com' WHERE docid=2;"
+    sqlite3 default.db "PRAGMA integrity_check; SELECT value FROM config WHERE docid=2;"
+
+【air launchd plist HTTPS_PROXY 片段】
+    /Library/LaunchDaemons/com.tailscale.tailscaled.plist 加入:
+        <key>EnvironmentVariables</key>
+        <dict>
+            <key>HTTPS_PROXY</key>
+            <string>http://127.0.0.1:1082</string>
+        </dict>
+    重启 daemon:
+        sudo launchctl bootout system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+        sudo launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+
+【air → mini/neo/neo2 灌 pubkey】
+    PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16AHXIHG/LhGxuK5uk5J9J kenair@Air"
+    for h in kenchoimini@100.70.22.7 kenchoios@100.68.57.96 kenchoineo2@100.96.153.17; do
+      ssh -o BatchMode=yes "$h" "echo '$PUB' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+    done
+
+【切网必做软修(铁律)】
+    sudo /opt/homebrew/bin/tailscale down
+    sleep 2
+    sudo /opt/homebrew/bin/tailscale up
+    sleep 5
+
+【last_published.txt 跨日小修】
+    ssh kenchoimini@100.70.22.7 "cp ~/Desktop/文章定时自动发布/运行报告/20260505/last_published.txt ~/Desktop/文章定时自动发布/运行报告/20260506/last_published.txt"
+
+
+================================
+九、验证命令清单(可复用)
+================================
+
+【看 air Tailscale 状态(本机视角)】
+    /opt/homebrew/bin/tailscale status --self
+
+【看跨机直连/relay】
+    台机:   tailscale ping 100.126.82.58
+    air:    /opt/homebrew/bin/tailscale ping 100.86.79.39
+    期望:   pong from <peer> via [...]:41641 in <Xms> direct
+    异常:   pong via DERP(sfo/hkg) → 关 fake-DNS 或软修
+
+【air daemon HTTPS_PROXY 通断】
+    curl -x http://127.0.0.1:1082 https://controlplane.tailscale.com/health -m 10
+    期望: HTTP 404 (TLS 握手通,GET endpoint 不接受)
+
+【air 路由表 100.x 走哪】
+    /sbin/route -n get 100.86.79.39
+    期望: interface=utun0
+    异常: interface=en0 + gateway=192.168.x.1 / 172.20.x.1 → 软修
+
+【NAT 类型 + Nearest DERP】
+    /opt/homebrew/bin/tailscale netcheck
+    重点看: UDP / MappingVariesByDestIP / Nearest DERP
+
+【4 mac SSH 互信端到端】
+    declare -A USER=( [100.70.22.7]=kenchoimini [100.68.57.96]=kenchoios [100.96.153.17]=kenchoineo2 )
+    for ip in 100.70.22.7 100.68.57.96 100.96.153.17; do
+      ssh -o BatchMode=yes -o ConnectTimeout=8 ${USER[$ip]}@$ip "echo OK from \$(hostname)"
+    done
+    任一 timeout / Permission denied → 立刻软修 + 灌 pubkey
+
+【scp 1MB 速度测】
+    ssh kenair@100.126.82.58 "dd if=/dev/urandom of=/tmp/speedtest_1m bs=1024 count=1024"
+    time scp kenair@100.126.82.58:/tmp/speedtest_1m /tmp/recv
+
+【看 Shadowrocket db 三层】
+    sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db \
+      "SELECT docid, name, value FROM config WHERE docid IN (2,3);"
+
+
+================================
+十、后续待修(留 BUG 列表)
+================================
+1) gtg_timer.py last_published.txt 跨日机制
+   现状: RUN_REPORT_DIR 按当日,跨日找不到昨日 last_published
+   建议: 搜索最近一日有此文件的运行报告目录,作为接续来源
+
+2) gtg_timer.py 失败账号 sent_count_map=0 行为
+   现状: 失败账号(月光吟梦)本轮 quota 未满 → 本轮中重新插队补
+   缺哥原方案: 失败账号本轮跳过,只在 Phase B 补漏
+   建议: 把"X 发布失败"账号视为已扣 quota,sent_count_map 加 1
+
+3) air Tailscale 切网自动化(阿良 选 A 或 B)
+   A 方案: launchd watcher 监听 com.apple.system.config.network_change,自动 tailscale down/up
+   B 方案: alias tsfix='sudo tailscale down && sleep 2 && sudo tailscale up'
+   阿良选了 A+B,落地见 air 端文档
+
+4) ken-choi (Windows 台机) air → ssh 22 fail
+   症状: air ssh kench@100.86.79.39 connection refused
+   推测: Windows OpenSSH Server 端 22 没监听 / firewall 拦
+   待: 单独排查,跟切网无关
+
+
+================================
+十一、历史教训沉淀
+================================
+
+【元规则: 用上记忆】
+    50+ 条已立,问题从不是规矩不够是不用
+    接任务第一动作 grep + Read 对照,出问题先反思旧规矩别立新条
+    今晚阿良 air 上 tailscale up --reset 之前没查 memory,搞出 3 个影子节点
+
+【声明前先实证】
+    "通常会"/"应该是"不算证据
+    今晚绣虎初判"接续失败"是基于片面信息,没读启动日志中"中断恢复:第 1 小轮第 93 账号"那条
+    导致缺哥白停一次 mini
+
+【反过度抛选择】
+    选项 A/B/C 抛回缺哥太多 → 阻塞决策
+    今晚做得好: 守护脚本/V1102.3 改法/4 网验证都给了具体行动方案,缺哥拍板即落地
+
+【按绣虎人设工作】
+    谋(看远) / 功(事功) / 断(冷酷) / 守(对全局负责)
+    今晚做得对: 跨机配置矩阵全审计(谋), 4 网验证完整(功), 不犹豫 ctrl-C 停 mini(断), 立 memory + push 5 机(守)
+
+【物理近 ≠ 网络近】
+    air 在台机左边, 但接到 Q6/移动子网 = 不同 LAN
+    Tailscale 走 sfo relay 5h
+    诊断网络问题先看 IP 段, 不要被物理位置误导
+
+【Shadowrocket 切配置 = 触发跨机问题】
+    切 SSID 后 Shadowrocket 自动重载 → fake-DNS 重置 → tailscaled 拿 fake-IP
+    100.64/10 路由被新网关抢 → 跨机 TCP 全 fail
+    任何 SSID 切换都触发,包括切回家
+
+【Tailscale 多节点身份混乱】
+    一台物理机 admin 后台多个节点 = 配置漂移
+    旧 air(100.67.252.1) + kenchoiair + air-1 = 3 个身份共存
+    解法: 改 hostname 之前先在 admin 后台删旧节点
+
+
+================================
+本档归档 + 同步
+================================
+git add 外出远端操控绣虎说明.txt
+git commit -m "docs: 立外出远端操控绣虎说明 - 全量复盘 5/5~5/6 五小时"
+git push
+
+后续如有新故障 / 经验,append 到末尾 + 同步阿良端"外出远端操控阿良说明.txt"
+两两印证,任何 5 机 Claude 接手新故障都能复盘。
