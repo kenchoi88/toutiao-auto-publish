@@ -1,0 +1,105 @@
+============================================================
+故障说明 — 2026-05-06(每日)
+============================================================
+日期:    2026-05-06
+位置:    自动发布/故障说明/故障说明_2026-05-06.txt
+责任:    各机 Claude / 缺哥 都可写
+
+【用法】
+  当日新发现 bug / 异常 → 立刻在 "未修" 段加一条
+  修了 → 移到 "已修" 段,补"修法 + 落地版本"
+  每条新 entry 在该段顶部插入(最新在上)
+  日终归档 → cp 一份到根目录 故障日志.txt 已修段顶部
+
+【条目格式】
+
+  --- [时间 HH:MM] [机器] [大件] [一句话标题] ---
+  现象: 一句话描述
+  影响: 涉及多少篇 / 多少账号 / 多少时间
+  上下文: 触发条件 / 重现步骤(可选)
+  推测根因: (可选)
+  谁记的: (机器名 / Claude 代号 / 缺哥)
+  状态: 未修 / 修中 / 已修
+
+  ★ 修后补:
+  修法: patch 哪几行 / 抄哪段 / 改了什么
+  落地版本: vXXXX.X
+  落地时间: HH:MM
+  落地人: 谁
+
+============================================================
+未修
+============================================================
+
+(暂无)
+
+============================================================
+已修
+============================================================
+
+--- [00:30~01:15] [air] [Tailscale 接入] [Shadowrocket TUN fake-IP 劫持 daemon 控制面注册 + 路由 + SSH 互信三连失] ---
+现象: 缺哥晚上准备让 air 重接 tailnet,5 个 tailscale 进程残留并存(2 tailscaled + sudo 卡 stdin + 多个 up 卡等)。
+      绣虎远程清理后 daemon 干净起步,但 tailscale up 仍不吐认证 URL,30 秒 timeout。
+      接入后 air → mini/neo/neo2 SSH 全 Operation timed out + Permission denied。
+影响: air 完全无法加入 tailnet,跨机 SSH/scp/dispatch.py 推送链路对 air 失效约 5 小时(出移动热点回家后断到本会话开始)。
+上下文: air 出门接移动热点 → 回家接 AX3 局域网 → Shadowrocket TUN 配置切换 → tailscaled 试图重连 controlplane 拿不到。
+推测根因: 三层叠加问题——(a) Shadowrocket fake-DNS 劫 controlplane.tailscale.com → 198.18.x;
+          (b) 接入后 100.64.0.0/10 路由被 utun9 抢,跨机 TCP 走 192.168.3.1 局域网网关丢包;
+          (c) air reauth 拿新 NodeKey 但 SSH host key 没自动同步,authorized_keys 对端不认。
+谁记的: 阿良(air) + 绣虎(台机)
+状态: 已修
+
+★ 修后补:
+
+修法(三件):
+  1. plist HTTPS_PROXY 注入(解 daemon 控制面被 fake-DNS 劫):
+     /Library/LaunchDaemons/com.tailscale.tailscaled.plist 加 EnvironmentVariables:
+       HTTPS_PROXY=http://127.0.0.1:1082
+       HTTP_PROXY=http://127.0.0.1:1082
+     bootout + bootstrap 重启 daemon,4 秒吐认证 URL。
+     原理: Go net/http 走 HTTPS_PROXY 时发 CONNECT controlplane.tailscale.com:443 给代理,
+           hostname 原样传 Shadowrocket,代理自己解 DNS 不走 Mac fake-IP。
+     备份: /Library/LaunchDaemons/com.tailscale.tailscaled.plist.bak.1777999342
+
+  2. tailscale down/up 软修路由(无需 reboot,跟 04-28 mini 必须 reboot 的实战不同):
+     tailscale down + tailscale up,daemon 重新注入 100.64.0.0/10 → utun0 路由表,
+     从 "default → 192.168.3.1 / en0" 改成 "100.64/10 → utun0",跨机 TCP 立通。
+
+  3. SSH 互信修复(绣虎从台机一次性灌,阿良不动):
+     台机 ssh 进 mini/neo/neo2 把 air 当前 ed25519 pubkey append 进 authorized_keys。
+     air 新 pubkey: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16AHXIHG/LhGxuK5uk5J9J kenair@Air
+
+  4. 顺手补漏 mini default.db docid=2 缺 100.64.0.0/10 的 skip-proxy:
+     UPDATE config SET value 追加 100.64.0.0/10 到第 4 位(跟 air 顺序一致)。
+     air 还多加了 docid=667 IP-CIDR,100.64.0.0/10,DIRECT,no-resolve 作 Rule 段第三层兜底。
+     摸出 Shadowrocket Rule 评估顺序按 c6created DESC 不是 docid。
+
+实证:
+  ① curl -x http://127.0.0.1:1082 https://controlplane.tailscale.com/health -m 10 → HTTP 404 / 1.71s ✓
+  ② tailscale ping 100.86.79.39 → pong from ken-choi via [IPv6]:41641 in 5ms direct ✓
+  ③ tailscale netcheck → UDP true / IPv4 yes / IPv6 yes ✓
+  ④ air → neo/mini/neo2 SSH 三连 echo OK 全通 ✓
+  ⑤ admin 端清旧 offline 节点 air(100.67.252.1, 1d ago) + kenchoiair(100.114.112.10, 15m ago)
+     新 air-1 改名 air,5 机对齐 air/ken-choi/mini/neo/neo2
+
+落地版本: air 单机 plist patch + mini default.db docid=2 hotfix(本机 Shadowrocket 配置,不入仓库版本号体系)
+         记忆沉淀:
+           - 大记忆术/记忆共享/feedback_tailscale_daemon_https_proxy.md(阿良升级,plist 实操+Rule c6created+软修路由+4 mac 矩阵)
+           - 大记忆术/win台机/feedback_shadowrocket_skip_proxy.md(绣虎大改,三层防御+矩阵+plist 救法引用)
+           - 大记忆术/win台机/feedback_Mac出门归来三查清单.md(绣虎新立,三查顺序+不要做的事)
+落地时间: 01:15
+落地人: 阿良(air 操作) + 绣虎(台机指挥+SSH 灌 pubkey)
+
+遗留警告(无法代劳):
+  Health check: macOS Screen Time seems to be blocking Tailscale.
+  缺哥本人去 System Settings → Screen Time → Content & Privacy → Access to Web Content 关限制(sudo 不能代)。
+
+教训:
+  Shadowrocket TUN + tailscale 重新登录 = 必死。
+  出门连陌生 WiFi 回家先做三查(详见 feedback_Mac出门归来三查清单.md):
+    ① plist HTTPS_PROXY 是否还活
+    ② tailscale ping 是 direct 还是 DERP relay
+    ③ db 三层放行还在不在
+  不查就 reauth 是上次 air 傻逼路径,搞出 3 个 air 节点 admin 后台清理一晚上。
+
+============================================================
