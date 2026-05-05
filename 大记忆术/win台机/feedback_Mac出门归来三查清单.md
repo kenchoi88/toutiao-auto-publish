@@ -1,12 +1,12 @@
 ---
-name: Mac 出门连陌生网回家三查清单
-description: air/mac 切 SSID(移动热点/咖啡馆 WiFi/酒店等)回家后,小火箭+Tailscale 互相搞坏,先查 3 项不要瞎重启
+name: Mac 切网必软修 + 三查清单 (任何 SSID 切换都触发, 包括切回家)
+description: 任何 SSID 切换(出门/回家/酒店/热点)Tailscale 路由 100.64 都被新网关抢, 跨机 TCP 全 fail; 切网必做 tailscale down && up 软修, 然后三查
 type: feedback
 originSessionId: 9d19d23b-db65-4712-96ac-91a7a3b3783b
 ---
-# Mac 出门连陌生网回家三查清单
+# Mac 切网必软修 + 三查清单
 
-(2026-05-06 立条,基于阿良 air 5-05 跟着缺哥出街连移动热点回家后,Tailscale 走 SFO relay + tailscaled daemon 拿 fake-IP 198.18.x 卡死的实战教训)
+(2026-05-06 立条,基于 air 跟缺哥出街实战教训。**5-06 凌晨四网验证(q6/5G/4G/AX3 切回)100% 复现路由抢 bug,包括切回家里 AX3 也中招** — 不是只有出门才坑,是切 SSID 必坑)
 
 ## 故障重现路径
 ```
@@ -21,9 +21,10 @@ originSessionId: 9d19d23b-db65-4712-96ac-91a7a3b3783b
   → 跨机 ssh 走 SFO 中转 RTT 370ms
 ```
 
-## ⚡ 第零步: 切网必做软修(2026-05-06 三网通杀实证后铁律)
+## ⚡ 第零步: 切网必做软修(2026-05-06 四网通杀实证铁律)
 
-q6 / 5G 热点 / 4G 热点三网验证全部复现"切网后 `100.64/10` 路由被新网关抢"bug。
+q6 / 5G 热点 / 4G 热点 / **AX3 切回家** 四网验证全部复现"切网后 `100.64/10` 路由被新网关抢"bug。
+**不是只有出门才中招** — 切回家里 AX3 也撞,任何 SSID 切换都触发。
 软修**不是诊断项**(等三查发现问题再修),**是切网必做项**(切网完成第一动作就跑)。
 
 ```bash
@@ -144,12 +145,14 @@ sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databas
   - route get 100.86.79.39: 走 192.168.10.1 不是 utun0
   - 软修 down/up 后路由表立刻回 utun0,3 mac SSH 全通(mini/neo/neo2)
 
-- 2026-05-06 01:32~01:37 5G/4G 热点验证三网通杀实证:
-  | 网络 | en0 段 | HTTPS_PROXY 时间 | DERP HKG | NAT 类型 | 路由 bug | 软修后 SSH |
+- 2026-05-06 01:32~01:42 5G/4G 热点+AX3 切回 四网通杀实证:
+  | 网络 | en0 段 | HTTPS_PROXY | DERP | NAT | 路由 bug | 软修后 SSH |
   |---|---|---|---|---|---|---|
-  | q6 | 192.168.10/24 | 1.75s | 47.7ms | easy | ❌ 复现 | 3 mac OK |
-  | 5G | 172.20.10/28 | 3.57s | 74ms | hard (sym) | ❌ 复现 | 3 mac OK |
-  | 4G | 172.20.10/28 | 2.22s | 84.6ms | hard (sym) | ❌ 复现 | 3 mac OK |
-  - 三网 100% 复现路由抢 bug → 立"切网必做软修"铁律 (零步前置)
-  - hard NAT 网络首次 ping 走 DERP 中转 2-3s,第二次切 P2P (P2P 协商时延正常)
-  - daemon HTTPS_PROXY + db 三层 + 软修 三层叠加,三网功能全通
+  | q6   | 192.168.10/24 | 1.75s | HKG 47.7ms | easy | ❌ 复现 | 3 mac OK |
+  | 5G   | 172.20.10/28  | 3.57s | HKG 74ms   | hard sym | ❌ 复现 | 3 mac OK |
+  | 4G   | 172.20.10/28  | 2.22s | HKG 84.6ms | hard sym | ❌ 复现 | 3 mac OK |
+  | **AX3 切回** | 192.168.3/24 | 1.81s | SFO 161ms | easy | **❌ 复现** | 3 mac OK |
+  - 四网 100% 复现路由抢 → 立"切网必做软修"铁律 (零步前置)
+  - **AX3 切回也中招颠覆"出门才坑"假设** → 任何 SSID 切换都触发
+  - hard NAT 网络首次 ping 走 DERP 2-3s,第二次切 P2P
+  - daemon HTTPS_PROXY + db 三层 + 软修 三层叠加,四网功能全通

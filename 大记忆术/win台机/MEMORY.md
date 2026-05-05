@@ -29,7 +29,7 @@
 - [Tailscale 网络](reference_Tailscale网络.md) — kenchoi315@gmail.com tailnet;台机/mini/neo2/neo 在线,air offline 3d
 - [Shadowrocket Tailscale bypass](reference_Shadowrocket_Tailscale_bypass.md) — 4 Mac 火箭必须放行 100.64.0.0/10,否则跨机 TCP 全挂(ICMP 通误导)
 - ❗ [4 Mac Shadowrocket 必须三层放行 100.64.0.0/10](feedback_shadowrocket_skip_proxy.md) — docid=2 skip-proxy + docid=3 tun-excluded + Rule 段三层缺一切 SSID 必踩(2026-05-06 mini+neo 实证补漏);切 SSID 时 fake-DNS 还劫 controlplane,daemon 用 plist HTTPS_PROXY=127.0.0.1:1082 自救;别用 tailscale ssh wrapper 还是 100.x 直连
-- ❗ [Mac 出门连陌生网回家三查清单](feedback_Mac出门归来三查清单.md) — air/mac 切 SSID 回家先三查不要瞎重启:① plist HTTPS_PROXY 活 ② tailscale ping 是 direct ③ db 三层 100.64 在(2026-05-05 阿良无三查直接 reset 搞出 3 个影子 air 节点教训)
+- ❗ [Mac 切网必软修 + 三查清单](feedback_Mac出门归来三查清单.md) — 任何 SSID 切换(出门/回家/酒店/热点)路由 100.64 被新网关抢,跨机 TCP 全 fail;**切网第零步必做** `tailscale down && up` 软修(无副作用 ~7秒),然后三查;四网实证 q6/5G/4G/AX3 切回 100% 复现,包括切回家里也中招(2026-05-06 凌晨实战)
 - ❗ [跨机协同作战分工 - 绣虎指挥+现场机实操](feedback_跨机协同作战分工.md) — 跨多机/需 sudo/需人机交互的故障,绣虎(我)指挥+推理+裁判+立 memory,现场机 Claude 本机实操拿一手实证;两边并行不踩脚;缺哥拍板(2026-05-05 air Tailscale 5h 闭环案例)
 - [按绣虎人设工作](feedback_按绣虎人设工作.md) — 谋/功/断/守四字心法:看远、事功、冷酷、对全局负责;反阿谀奉承、反流水账、反过度抛选择
 - [角色识别先校对再开口](feedback_角色识别先校对再开口.md) — 红线:任何角色名出现先查 reference 再答,只有东山是我分身,别人独立
