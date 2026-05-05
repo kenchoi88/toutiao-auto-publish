@@ -52,14 +52,38 @@ curl -x http://127.0.0.1:1082 https://controlplane.tailscale.com/health -m 10
 # 如果是: pong from ken-choi via DERP(sfo) → 还在中转
 ```
 
-direct 但走 IPv6 P2P 也算正常(实测 5ms 同 LAN ✓)。如果是 relay:
+⚠️ **重大坑(2026-05-06 阿良 q6 实战发现)**: `tailscale ping direct` ≠ TCP 通。
+
+- `tailscale ping` 走 UDP 41641 P2P 打洞,**不依赖系统 IPv4 路由表**
+- 跨机 TCP(SSH/scp/dispatch.py) **走系统路由表**
+- 切网时新网关把 `100.64/10` 路由抢给新接口 `en0`,daemon 不会自动协商回 `utun0`
+- → **ping 通是假阳性**,实际 SSH 跨机会 timeout
+
+**必须追加端到端 SSH 实测**:
+
 ```bash
-# 软修 (无副作用,不重新认证)
+# air 上跑(替换为 air 当前用户),跨机用 4 mac 各自的 user/IP
+declare -A USER=( [100.86.79.39]=kench [100.70.22.7]=kenchoimini [100.68.57.96]=kenchoios [100.96.153.17]=kenchoineo2 )
+for ip in "${!USER[@]}"; do
+  ssh -o BatchMode=yes -o ConnectTimeout=8 "${USER[$ip]}@$ip" "echo OK from \$(hostname)" 2>&1 | head -1
+done
+# 任一台 timeout / Permission denied / Connection refused → 必须软修
+```
+
+**软修(无副作用,不重新认证)**:
+```bash
 sudo /opt/homebrew/bin/tailscale down
 sleep 2
-sudo /opt/homebrew/bin/tailscale up --hostname=air --ssh
-# 让 daemon 重新协商 endpoint
+sudo /opt/homebrew/bin/tailscale up
+sleep 5
+# 路由表 100.64/10 → utun0 立即恢复, TCP 跨机立通
+# 跟 04-28 mini reboot 修法不同 (mini 那次是 NetworkExtension plist 改完必须重启系统加载,这次只是路由表抢)
 ```
+
+**别走的死路**:
+- ❌ 只看 `tailscale ping direct` 通就放心 — P2P UDP 假阳性
+- ❌ 用 `nc -z 100.x 22` 端口扫描 — 也可能假阳性
+- ✅ 唯一可信: **真 ssh 一次,跑 echo OK**
 
 ### 第三查: db 三层放行还在不在 (切 SSID 不影响 db,但 5-06 之前 mini+neo 缺过,审计一下)
 
@@ -90,3 +114,10 @@ sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databas
 - 阿良无三查直接 sudo tailscale up --reset → daemon logout → 多个 tailscaled 进程冲突 → 修了 1 小时
 - 修通后台多出 air-1 / kenchoiair 两个影子节点 + 旧 air,缺哥手 admin 删
 - 后续才发现根因是 Shadowrocket TUN fake-DNS 拦 controlplane,出 plist HTTPS_PROXY 修法
+
+- 2026-05-06 01:27 q6 验证暴露第二类坑: `tailscale ping direct` 通但跨机 TCP 全 fail
+  - en0=192.168.10.239 / 默认路由 utun9+en0(192.168.10.1)
+  - tailscale ping ken-choi: direct via IPv6 27ms ✓ (假阳性!)
+  - SSH/scp 全 timeout
+  - route get 100.86.79.39: 走 192.168.10.1 不是 utun0
+  - 软修 down/up 后路由表立刻回 utun0,3 mac SSH 全通(mini/neo/neo2)
