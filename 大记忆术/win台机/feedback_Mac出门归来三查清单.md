@@ -21,6 +21,28 @@ originSessionId: 9d19d23b-db65-4712-96ac-91a7a3b3783b
   → 跨机 ssh 走 SFO 中转 RTT 370ms
 ```
 
+## ⚡ 第零步: 切网必做软修(2026-05-06 三网通杀实证后铁律)
+
+q6 / 5G 热点 / 4G 热点三网验证全部复现"切网后 `100.64/10` 路由被新网关抢"bug。
+软修**不是诊断项**(等三查发现问题再修),**是切网必做项**(切网完成第一动作就跑)。
+
+```bash
+sudo /opt/homebrew/bin/tailscale down
+sleep 2
+sudo /opt/homebrew/bin/tailscale up
+sleep 5
+# 路由表 100.64/10 → utun0 立即恢复
+```
+
+**Why 必须前置**:
+- `tailscale ping` 走 UDP P2P **不依赖系统路由表**,看着 direct ✓ 假阳性
+- 跨机 TCP(SSH/scp/git push)走系统路由表,**100.64/10 被新网关抢就全 fail**
+- 实证 q6/5G/4G 三网全复现,easy NAT / hard NAT 都中招 → **强重现,必须铁律**
+
+跑完软修再走三查不是浪费 — 软修无副作用(不重新认证,不丢节点,~7 秒)。
+
+---
+
 ## 三查清单 (按顺序,不查直接重启会越搞越乱)
 
 ### 第一查: Shadowrocket 是否还在劫 daemon
@@ -121,3 +143,13 @@ sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databas
   - SSH/scp 全 timeout
   - route get 100.86.79.39: 走 192.168.10.1 不是 utun0
   - 软修 down/up 后路由表立刻回 utun0,3 mac SSH 全通(mini/neo/neo2)
+
+- 2026-05-06 01:32~01:37 5G/4G 热点验证三网通杀实证:
+  | 网络 | en0 段 | HTTPS_PROXY 时间 | DERP HKG | NAT 类型 | 路由 bug | 软修后 SSH |
+  |---|---|---|---|---|---|---|
+  | q6 | 192.168.10/24 | 1.75s | 47.7ms | easy | ❌ 复现 | 3 mac OK |
+  | 5G | 172.20.10/28 | 3.57s | 74ms | hard (sym) | ❌ 复现 | 3 mac OK |
+  | 4G | 172.20.10/28 | 2.22s | 84.6ms | hard (sym) | ❌ 复现 | 3 mac OK |
+  - 三网 100% 复现路由抢 bug → 立"切网必做软修"铁律 (零步前置)
+  - hard NAT 网络首次 ping 走 DERP 中转 2-3s,第二次切 P2P (P2P 协商时延正常)
+  - daemon HTTPS_PROXY + db 三层 + 软修 三层叠加,三网功能全通
