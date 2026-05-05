@@ -1,0 +1,1463 @@
+============================================================
+外出远端操控阿良说明
+============================================================
+作者:        阿良 (air)
+立条时间:    2026-05-06 凌晨
+内容来源:    2026-05-05 晚 ~ 2026-05-06 01:55 闭环全程
+        缺哥带 air 出移动热点回家 Tailscale 走 SFO relay 故障 →
+        阿良 + 绣虎(台机)+ 缺哥三人合作五小时,从清进程残留到落地
+        plist HTTPS_PROXY + Shadowrocket db 三层 + LaunchAgent watcher
+        全套自动化,顺手补漏 mini docid=2 缺漏 + 修 SSH 互信 +
+        四网(AX3/q6/移动5G/移动4G)实战压力测试通过。
+
+适用场景:    缺哥再带 air 出门连陌生 WiFi/热点,或者出问题需要回溯指令、
+            根因、对话、决策的所有上下文,本文一站全。
+            **本文的目标 = 一个独立的故事 + 一份完整的操作手册,
+              下次出门看本文一份就够,不用再翻其他记忆**。
+
+引用记忆(避免重复但保持引用):
+  - 大记忆术/记忆共享/feedback_tailscale_daemon_https_proxy.md (阿良维护)
+  - 大记忆术/win台机/feedback_shadowrocket_skip_proxy.md (绣虎维护)
+  - 大记忆术/win台机/feedback_Mac出门归来三查清单.md (绣虎维护)
+  - 大记忆术/win台机/feedback_跨机协同作战分工.md (绣虎维护)
+  - 自动发布/故障说明/故障说明_2026-05-06.txt (当日独立)
+  - 故障日志.txt (5-04 已修条目, v1102 中断恢复算法缺陷, 跟本故事无关)
+
+
+============================================================
+目录
+============================================================
+§1. 故障背景 (起点)
+§2. 全程时间线 (浓缩,所有关键节点)
+§3. 全部技术指令 cheatsheet (按场景分组)
+§4. 跟绣虎对话节录 (关键决策点)
+§5. 落地清单 (今晚最终所有变更)
+§6. 出门 cheatsheet (缺哥再带 air 出门时怎么用)
+§7. 教训 / 不要踩的弯路 / 出门前提醒
+§8. 全程时长 + 协作模式
+§9. 完整指令逐条复盘 (无脑可抄)
+§10. 关键代码片段 (plist / Python watcher / zshrc 函数)
+§11. 验证数据 (四网三查矩阵原始输出)
+
+
+============================================================
+§1. 故障背景 (起点)
+============================================================
+
+时间:  2026-05-05 晚 (具体时间不可考,缺哥带 air 出过移动热点)
+机器:  air (Macbook Air, 主力机)
+症状:  缺哥带 air 出门连移动热点 → 回家接 AX3 局域网 →
+       Tailscale 卡 SFO DERP relay 5+ 小时,跨机 ssh 走美国中转
+       RTT 370ms,dispatch.py / scp / 任何跨机 IO 全废。
+
+缺哥 ssh 进 air 看到的进程残留:
+
+    508   tailscaled (主 daemon, system 装的)
+    3432  sudo -S tailscale up --accept-routes (sudo 卡 stdin)
+    3436  tailscale up --accept-routes (3432 子进程)
+    4371  tailscaled (用户态另一份 daemon!!)
+    60079 tailscale up --hostname=air --reset (前面会话发的卡死中)
+
+5 进程残留并存,sudo 卡 stdin → 没人能 kill,daemon socket
+冲突 → tailscale up 不知道连哪个 daemon → 无 URL 输出。
+
+绣虎(台机)远程 ssh 排查不能 sudo,叫阿良(air)接手处理。
+绣虎原话:
+"找到根因 — air 上 5 个 tailscale 相关进程并存互相冲突...
+ 两个 tailscaled 实例 + 一个 sudo 卡在 stdin = tailscale up 不知道
+ 连哪个 socket,所以无 URL 输出。
+ 清理只能你本地 sudo 操作 (我 ssh 没密码 kill 不了 sudo/root 进程)。"
+
+缺哥指令:
+"我让阿良来跑,是他傻逼带他出去之后他连回来瞎几把搞的"
+"收到,你让阿良处理 air 这台机的 Tailscale 残留 + 重登。"
+
+
+============================================================
+§2. 全程时间线 (浓缩,所有关键节点)
+============================================================
+
+时间表:
+  阶段 1   清进程残留 + 删 state file              00:30 ~ 00:35
+  阶段 2   抓真因 fake-IP 劫持                     00:35 ~ 00:42
+  阶段 3   设计 + 落地 plist HTTPS_PROXY           00:42
+  阶段 4   浏览器认证 + admin 清理                 00:43 ~ 00:50
+  阶段 5   绣虎复盘 + 阿良三问                     00:50 ~ 00:55
+  阶段 6   Shadowrocket db 三层兜底               00:55 ~ 01:10
+  阶段 7   软修路由表 (down + up)                  01:00
+  阶段 8   SSH 互信修复 (绣虎台机灌 pubkey)       01:05 ~ 01:10
+  阶段 9   4 mac db 矩阵 + mini docid=2 补漏      01:10 ~ 01:13
+  阶段 10  写 memory + push                       01:15 ~ 01:25
+  阶段 11  四网压力测试 (q6/5G/4G/AX3 切回)       01:25 ~ 01:42
+  阶段 12  A+B 双轨自动化 (tsfix + watcher)       01:42 ~ 01:55
+
+[阶段 1] 清进程残留 + 删 state file (00:30 ~ 00:35)
+─────────────────────────────────────────────────────────
+缺哥 在 air Terminal 跑:
+    sudo pkill -9 -f tailscale (输密码)
+    sleep 5
+    ps aux | grep tailscale | grep -v grep
+阿良 ps 验证: 只剩 system daemon 60478 (brew launchd 重拉)
+阿良 /opt/homebrew/bin/tailscale status → "Logged out"
+
+阿良 跑 tailscale up --hostname=air → 30s 不吐 URL (诡异)
+阿良 误判: daemon state file 残留假登录态(WantRunning=true 但
+          status=Logged out 自相矛盾)
+阿良 sudo 自动化跑(用 sudo -S + 密码 stdin):
+    sudo launchctl bootout system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+    sudo rm /opt/homebrew/var/lib/tailscale/tailscaled.state
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+    sleep 3
+阿良 daemon 干净起步,但 tailscale up 仍不吐 URL (沉没成本 5min)
+
+[阶段 2] 抓真因 fake-IP 劫持 (00:35 ~ 00:42)
+─────────────────────────────────────────────────────────
+阿良 跑 tailscale debug watch-ipn 后台监听 daemon 状态,关键日志:
+    "register request: Post controlplane.tailscale.com:
+     connection attempts aborted by context: deadline exceeded"
+    "logtail: dial 198.18.0.155:443 i/o timeout"  ← 关键!!
+    "trying bootstrapDNS('derp5f.tailscale.com', '172.105.166.103')..."
+
+阿良 198.18.x 是 Shadowrocket Fake-IP 段,定位 Shadowrocket TUN 劫:
+    - DNS resolver → utun9 (198.18.0.2) → fake-IP DNS
+    - controlplane.tailscale.com → 198.18.0.55 (假的)
+    - log.tailscale.com → 198.18.0.155 (假的)
+    - 默认路由 default → utun9 优先 (Shadowrocket 抢的)
+    - 连真 IP → 30s timeout
+
+阿良 ps aux | grep MacPacket → PID 1387 = Shadowrocket NetworkExtension
+     /Applications/Shadowrocket.app + MacPacketTunnel.appex
+     用户 GUI app PID 703
+
+阿良 scutil --proxy → HTTPPort 1082 / HTTPProxy 127.0.0.1
+     (确认 Shadowrocket HTTP 代理端口是 1082)
+
+阿良 lsof -nP -iTCP:1082 -sTCP:LISTEN
+     验证 PID 1387 在 192.168.3.7:1082 / 127.0.0.1:1082 / [::1]:1082 listen
+
+阿良 nslookup controlplane.tailscale.com 在 air 上
+     → Server: 198.18.0.2, Address: 198.18.0.55 (fake-IP 确认劫持)
+
+[阶段 3] 设计 + 落地 plist HTTPS_PROXY (00:42)
+─────────────────────────────────────────────────────────
+阿良 方案: 注 HTTPS_PROXY=http://127.0.0.1:1082 给 daemon,
+     让 daemon 走 Shadowrocket HTTP 代理(CONNECT host:443),
+     代理服务器自己解 controlplane.tailscale.com (走它远端 DNS),
+     完全绕开 Mac 系统 fake-IP。
+     原理: Go net/http 走 HTTPS_PROXY 时发 "CONNECT host:443",
+           hostname 字符串原样传代理,不依赖本地解析。
+
+阿良 改 /Library/LaunchDaemons/com.tailscale.tailscaled.plist:
+     原 plist 备份: /Library/LaunchDaemons/com.tailscale.tailscaled.plist.bak.1777999342
+
+     插入到 <dict> 内:
+       <key>EnvironmentVariables</key>
+       <dict>
+           <key>HTTPS_PROXY</key>
+           <string>http://127.0.0.1:1082</string>
+           <key>HTTP_PROXY</key>
+           <string>http://127.0.0.1:1082</string>
+       </dict>
+
+阿良 sudo bootout + bootstrap → daemon 带新环境变量重启 PID 61925
+
+阿良 跑 tailscale up --hostname=air → 4 秒吐认证 URL!! ✓
+     URL: https://login.tailscale.com/a/fef027401db75
+
+[阶段 4] 浏览器认证 + admin 清理 (00:43 ~ 00:50)
+─────────────────────────────────────────────────────────
+阿良 跑 open 命令在 air 弹出默认浏览器:
+     open "https://login.tailscale.com/a/fef027401db75"
+     缺哥 选 kenchoi315 账号 + 点 Connect
+
+daemon 自动注册:
+    初始 hostname=air-1 (旧 air 100.67.252.1 占名,自动加 -1)
+    IPv4: 100.126.82.58
+    IPv6: fd7a:115c:a1e0::a932:523a
+    MagicDNS: air.tail3959ac.ts.net
+
+Health check 警告:
+    "macOS Screen Time seems to be blocking Tailscale.
+     Try disabling Screen Time in System Settings > Screen Time
+     > Content & Privacy > Access to Web Content."
+    (缺哥本人去关,sudo 不能代)
+
+阿良 open admin 控制台,缺哥本人删两个 offline 旧节点:
+    - air        (100.67.252.1)   last seen 1d ago
+    - kenchoiair (100.114.112.10) last seen 15m ago
+
+缺哥 在 admin 直接手改 air-1 machine name → air (UI 直改)
+
+阿良 tailscale set --hostname=air --accept-routes
+阿良 tailscale set --ssh=true (开内置 SSH 22 端口)
+     (不重新 up, 不触发 reauth, 关键!)
+
+[阶段 5] 绣虎复盘 + 阿良三问 (00:50 ~ 00:55)
+─────────────────────────────────────────────────────────
+绣虎 论证 阿良方案副作用:
+    ① 端口 1082 hardcode (要先验证用户是否改过)
+    ② Shadowrocket 关 = Tailscale 挂 (硬依赖)
+    ③ 隐私给小火箭日志 (影响极小)
+    ④ 启动顺序依赖 (Shadowrocket 必须先于 tailscaled)
+
+绣虎 补漏 4 件:
+    a. 跨机 100.x 流量直连 — 是否还需 Shadowrocket 规则补
+    b. 4 Mac 是否预防性回灌 plist
+    c. 立 reference_Mac_Shadowrocket_TUN_vs_Tailscale.md
+    d. 立 feedback_Mac出门归来三查清单.md
+
+绣虎 策略指令(两层防御):
+    第一层(daemon 控制面): plist HTTPS_PROXY ✓ 已落地
+    第二层(数据面 100.x): db 加 IP-CIDR 100.64.0.0/10 DIRECT no-resolve
+
+绣虎 直接给 SQL 步骤(Step A/B/C/D/E):
+    A. 看 air 上 docid=2 当前 value (做格式模板)
+    B. ssh mini 看 mini docid=2 value
+    C. 备份 mini default.db
+    D. UPDATE mini docid=2 追加 100.64
+    E. integrity_check + value 验证
+
+阿良 三问 给绣虎:
+    1. plist 落地了吗? → ✓ 已落地
+    2. Shadowrocket 规则补 100.64? → 加 (Rule 段兜底)
+    3. 回灌 4 mac? → 仅 air 装 plist (其他三机当前 direct active)
+                    db 100.64 要 4 mac 都查
+    4. 立记忆? → 是
+
+绣虎 裁判 4 mac 回灌策略:
+    plist HTTPS_PROXY: 不预防性装 mini/neo/neo2/台机
+        理由:它们当前 TS 全 direct active 正常 → 说明 Shadowrocket 不在
+            TUN 模式或没 fake-DNS 拦 controlplane
+            装 plist 反而引入 "Shadowrocket 1082 必须活" 的硬依赖
+    db skip-proxy 100.64.0.0/10: 要验证 mini/neo/neo2 是否都有
+        按记忆 feedback_shadowrocket_skip_proxy.md 立的就是 "4 Mac
+        火箭必须放行 100.64.0.0/10"
+        如果 mini/neo/neo2 缺了, 下次切网络可能复现 air 故障
+
+[阶段 6] Shadowrocket db 三层兜底 (00:55 ~ 01:10)
+─────────────────────────────────────────────────────────
+阿良 摸 Shadowrocket 配置数据库:
+    路径: ~/Library/Containers/com.liguangming.Shadowrocket/
+          Data/Documents/Databases/default.db
+    (有 2026-04-27 阿良改过的 .bak 备份痕迹:
+     default.db.bak.20260427_231009
+     default.db.bak.20260427_232802.tun_excl
+     default.db.bak.20260427_235332.tun_excl_ts
+     default.db.bak.before_revert_20260502_002804
+     default.db.bak.dns_direct_20260502_001742
+     default.db.bak.dns_server_20260504_152306
+     default.db.bak.fixall_20260504_152407)
+
+阿良 Schema:
+    FTS3 虚表 config(section, name, value, option, ext, remarks, created)
+    物理表 config_content(c0section, c1name, c2value, c3option,
+                         c4ext, c5remarks, c6created)
+
+阿良 查 section 分类:
+    rule       640 条
+    general    23 条
+    urlrewrite 2 条
+    host       1 条
+
+阿良 重大发现:
+    * 100.64.0.0/10 已经在 docid=2 skip-proxy + docid=3
+      tun-excluded-routes 里 (4-27 阿良 已加)
+        docid=2 c2value: "192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12,
+                         100.64.0.0/10, localhost, *.local, captive.apple.com"
+        docid=3 c2value: "10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+                         169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24,
+                         192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16,
+                         198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4,
+                         255.255.255.255/32, 239.255.255.250/32"
+    * 但 Rule 段没显式 IP-CIDR 100.64 兜底
+    * Shadowrocket Rule 评估顺序 = c6created DESC,不是 docid !!
+      证据: 660-666 的 bytedance/ixigua DIRECT 在 docid=656
+      FINAL,PROXY 之后,但 created=1777879447 大,实际优先级高于 FINAL
+      (我之前一直以为按 docid 排序,这是关键纠正)
+
+阿良 备份 default.db.bak.tailscale_direct_20260506_005611
+阿良 INSERT (走 FTS3 虚表保证索引同步):
+    INSERT INTO config(section, name, value, option, ext, remarks, created)
+    VALUES('rule', 'IP-CIDR', '100.64.0.0/10', 'DIRECT', 'no-resolve', '',
+           CAST(strftime('%s','now') AS INTEGER));
+    → docid=667, c6created=1778000254
+    → FTS3 integrity OK + PRAGMA integrity_check ok
+
+阿良 Step 4 验证(给绣虎复查):
+    ① curl -x http://127.0.0.1:1082 https://controlplane.tailscale.com/health -m 10
+        → HTTP 404 / 1.71s ✓ (TLS 通,404 是 endpoint 不接 GET 预期)
+    ② tailscale ping 100.86.79.39 (台机)
+        → pong from ken-choi via [IPv6]:41641 in 5ms direct ✓
+    ③ tailscale netcheck → UDP true / IPv4 yes / IPv6 yes ✓
+    ④ route -n get 100.86.79.39 → en0+192.168.3.1 (异常!)
+        tailscale ping 走 UDP P2P 不依赖系统路由表,所以 ping 通,
+        但跨机 TCP 走系统路由 → 跨机 SSH 不通 (隐藏 bug 第一次暴露)
+
+[阶段 7] 软修路由表 (01:00)
+─────────────────────────────────────────────────────────
+阿良 bug 描述:
+    路由 100.64/10 → 192.168.3.1/en0 (en0 局域网网关抢了),
+    不是 100.64/10 → utun0 (Tailscale)
+    en0+192.168.3.1 收到 100.x 包不认,直接丢,跨机 SSH timeout
+
+阿良 软修 (不需要 reboot):
+    /opt/homebrew/bin/tailscale down
+    sleep 2
+    /opt/homebrew/bin/tailscale up
+    sleep 5
+    → daemon 重新注入 100.64/10 → utun0 ✓
+    → 跨机 SSH 立通 (mini/neo2 OK,neo Permission denied 是 SSH key 问题)
+
+    关键差异:
+        04-28 mini 实战 (绣虎记忆 feedback_shadowrocket_skip_proxy.md)
+        说必须 reboot macOS 才能让 NE reload — air 5-06 实战不用 reboot,
+        软修即可 — 是首次接入 vs plist 改完两个不同场景,前者 daemon
+        重新协商就能修
+
+[阶段 8] SSH 互信 (绣虎从台机干) (01:05 ~ 01:10)
+─────────────────────────────────────────────────────────
+阿良 air → neo SSH Permission denied — air reauth 拿了新 NodeKey
+     但 SSH host pubkey 也跟着变了 (kenair@KenChoiair → kenair@Air),
+     neo 的 authorized_keys 不认。
+
+阿良 cat ~/.ssh/id_ed25519.pub:
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16
+                 AHXIHG/LhGxuK5uk5J9J kenair@Air
+
+绣虎 从台机一次性灌进 neo + mini + neo2 authorized_keys (避免 air
+     交互输密码不可行):
+
+    PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16
+         AHXIHG/LhGxuK5uk5J9J kenair@Air"
+
+    # neo
+    ssh kenchoios@100.68.57.96 \
+      "echo '$PUB' >> ~/.ssh/authorized_keys && \
+       chmod 600 ~/.ssh/authorized_keys"
+
+    # mini, neo2
+    for h in kenchoimini@100.70.22.7 kenchoineo2@100.96.153.17; do
+      ssh "$h" "if grep -q 'AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16AHXIHG/LhGxuK5uk5J9J' \
+                  ~/.ssh/authorized_keys 2>/dev/null; then \
+                  echo 已存在; \
+                else \
+                  echo '$PUB' >> ~/.ssh/authorized_keys && echo 追加成功; \
+                fi"
+    done
+
+阿良 验证 air → 3 mac SSH echo OK 三连:
+    kenchoimini@mini   → OK from KenChoimini  ✓
+    kenchoios@neo      → OK from KenChoineo   ✓
+    kenchoineo2@neo2   → OK from KenChoineo2  ✓
+
+[阶段 9] 4 mac db 矩阵 + mini docid=2 补漏 (01:10 ~ 01:13)
+─────────────────────────────────────────────────────────
+阿良 ssh 进 mini/neo/neo2 查 db docid=2/3 100.64.0.0/10:
+    air   docid=2 ✓ docid=3 ✓ docid=667 IP-CIDR ✓ (新加)
+    mini  docid=2 ✗(缺!)  docid=3 ✓
+    neo   docid=2 ✓        docid=3 ✓
+    neo2  docid=2 ✓        docid=3 ✓
+
+绣虎 mini 现在补,不赌运气切 SSID 时复现:
+    1. 备份 mini default.db
+    2. UPDATE docid=2 追加 100.64.0.0/10 (在 172.16.0.0/12 后插入,
+       跟 air 顺序一致;务必保留 mini 自己的 *.eastmoney.com 两条!)
+    3. integrity_check + value 验证
+
+落地结果:
+    备份 default.db.bak.skipproxy_100x_20260506_010910 (110592 bytes) ✓
+    UPDATE exit 0 ✓
+    PRAGMA integrity_check = ok ✓
+    docid=2 value = "192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12,
+                    100.64.0.0/10, localhost, *.local, captive.apple.com,
+                    *.eastmoney.com, push2.eastmoney.com" ✓
+
+阿良 顺手查 neo (之前 SSH 不通错过,现在补):
+    docid=2 ✓ docid=3 ✓ 还多了 *.eastmoney.com / push2.eastmoney.com
+
+最终 4 mac 矩阵全 ✓,闭环达成。
+
+[阶段 10] 写 memory + push (01:15 ~ 01:25)
+─────────────────────────────────────────────────────────
+绣虎 在台机端写两条 + commit 5b85b1a:
+    - 大改 win台机/feedback_shadowrocket_skip_proxy.md
+      (三层防御 + 4 mac 矩阵 + plist 救法引用)
+    - 新立 win台机/feedback_Mac出门归来三查清单.md
+      (三查顺序 + 不要做的事 + 5-05 教训)
+    - 同步 win台机/MEMORY.md 索引顶部 ❗ 加两条
+
+阿良 在 air 端处理 git rebase 烂尾:
+    - 发现本地 .git/rebase-merge 卡了 5-04 绣虎的 12a6ff6 commit
+      "shared(project): v1102 实际定义" — 文件在工作区 added by them
+      状态,但远端 main 从来没收到这条 commit
+    - 备份 → abort rebase → reset --hard origin/main → pull 远端
+      5 个新 commit (3ac8d0f / 6abc15b / 7a9e1b2 / b0239e7 / 5b85b1a)
+    - 用绣虎原作者归属 + 原日期 (Mon May 4 18:31:35 2026 +0800) 重新
+      commit project_v1102_meaning.md (新路径 大记忆术/记忆共享/,
+      旧 shared_memory/ 已废弃)
+    - 缺哥纠正: 我在 commit message 里掺进 Tailscale 工作的备注
+      ("阿良在 air 修通 Tailscale 时一并恢复"),跟 v1102 业务无关
+      → amend message,删那段备注,纯净绣虎原意
+
+阿良 写自己的:
+    - 大记忆术/记忆共享/feedback_tailscale_daemon_https_proxy.md
+      (升级完整版: plist 实操 + Rule c6created 排序 +
+       tailscale down/up 软修 + 4 mac 矩阵 + SSH 互信副效应)
+    - 自动发布/故障说明/故障说明_2026-05-06.txt
+      (每日独立 txt,不是根目录 故障日志.txt — 缺哥纠正一次)
+
+    缺哥纠正记忆位置:
+    "每天的故障报告,就是一个独立的 txt"
+    "今天是 5 月 6"
+    "明天的情况就是 5 月 7 的故障说明了,都是每天一份"
+
+    根据 win台机/MEMORY.md 索引里的 feedback_版本说明故障说明存放位置:
+        新版本说明 → 自动发布/自动发布V<X>/V<X>版本说明.txt (跟版本号目录绑)
+        故障说明 → 自动发布/故障说明/故障说明_YYYY-MM-DD.txt (当日独立 + 未修/已修分段)
+        根目录 版本说明.txt 故障日志.txt 只留指针不再 append
+        (2026-05-05 缺哥两纠的规矩)
+
+    commit 95fcc5d (阿良) + b78477c (绣虎 v1102) 一起 push 上 origin/main
+
+[阶段 11] 四网压力测试 (01:25 ~ 01:42)
+─────────────────────────────────────────────────────────
+缺哥 指令: 验证 air 切 4 网都能扛 — q6 / 移动 5G / 移动 4G / AX3 切回
+
+阿良 做一键三查脚本固化在 /tmp/ts_check.sh <label>:
+    内容:
+      - 网络环境 (SSID + en0 IPv4 + 默认路由)
+      - 第一查: plist HTTPS_PROXY (curl -x 1082 测 controlplane TLS)
+      - 第二查: tailscale status / ping ken-choi / netcheck
+      - 第三查: db 三层 (sqlite3 docid=2/3 100.64)
+      - 跨机 TCP 抽测 (nc -G 5 -z 100.x:22)
+
+数据汇总:
+                     en0 段           HTTPS_PROXY  DERP HKG    NAT      路由 bug   软修后 SSH
+    AX3 baseline     192.168.10.239   1.90s        SFO 161ms   easy     ❌ 复现     —
+    q6               192.168.10/24    1.75s        47.7ms      easy     ❌ 复现     3 mac OK
+    5G 热点          172.20.10/28     3.57s        74ms        hard     ❌ 复现     3 mac OK
+    4G 热点          172.20.10/28     2.22s        84.6ms      hard     ❌ 复现     3 mac OK
+    AX3 切回         192.168.3.7      1.81s        SFO 161ms   easy     ❌ 复现     3 mac OK
+
+四网铁律:
+    切网必复现路由 bug,无例外,包括家里 AX3 切回
+    tailscale ping P2P UDP 通 ≠ 跨机 TCP 通
+    ping 通有误导,真验证靠跨机 SSH echo OK
+    软修 tailscale down/up 万能,30s 内恢复
+
+绣虎 commit f929cb9 立四网铁律 push (写进 win台机/feedback_Mac出门归来三查清单.md 第二查后追加)
+
+[阶段 12] A+B 双轨自动化 (01:42 ~ 01:55)
+─────────────────────────────────────────────────────────
+绣虎 三选一:
+    A. launchd watcher 自动化 (写脚本监听 network_change)
+    B. ~/.zshrc tsfix 函数手动一键
+    C. 不做自动化,靠记忆 + 三查
+
+绣虎 给阿良: "你判断哪条划算 + 指出我没看到的边界
+              (特别是 launchd watcher 跟 Shadowrocket 切配置时序冲突的可能性)。
+              判完贴回,我裁判。"
+
+阿良 判: A+B 双轨,B 兜底 A,C 不选 (切网太频繁,记不住)
+
+阿良 5 条边界 (绣虎没看到的):
+    ① Shadowrocket NE 时序冲突(最大坑)
+       Shadowrocket 自己也监听 network_change,会重新拉 utun9 +
+       注入 tun-excluded-routes。watcher 同时触发 tailscale up,
+       daemon 跑得比 NE 快时,daemon 注入 100.64/10 → utun0
+       后 NE 起来又会再写一次甚至覆盖 → 我们刚修好的路由又被打回去
+       对策: watcher 收到事件后必须 sleep 5-8s 再跑,
+            给 Shadowrocket 自己折腾完的时间
+
+    ② 防抖 (debounce)
+       SSID 漂移 / 热点反复开关 → network_change 一秒内可能 5-10 次
+       watcher 不防抖会嵌套 down/up,daemon 状态错乱
+       对策: 用 PID 文件 + 时间戳, "最后一次事件 5s 内不再触发"
+
+    ③ 断网 vs 切换的判断
+       完全断网也触发 network_change,此时跑 tailscale up 浪费
+       对策: 跑前先验 route -n get default 是否有可达 gateway
+
+    ④ 路由已经对的就不跑 (关键防自我攻击)
+       唤醒 / 配置变更等场景路由可能本来就好的
+       对策: 先验 netstat -rn | grep '^100.64/10.*utun0',
+            已经在 utun0 才跑,否则跳过
+
+    ⑤ Kill switch (防自杀)
+       万一 watcher 死循环 (每次 up 触发 network_change 又触发 watcher),
+       air 立即变砖
+       对策: 脚本顶部加 [ -f /tmp/ts_watcher_disable ] && exit 0
+            一旦出 bug,远程 touch /tmp/ts_watcher_disable 一秒禁用
+
+缺哥 拍板: "我直接告诉你,ab,干"
+
+阿良 落地:
+    B 路 (5min): ~/.zshrc 加 tsfix() {...}
+    A 路 (30min):
+      ~/.config/ts-watcher/ts-watcher.py    (Python 30s 轮询)
+      ~/Library/LaunchAgents/com.kenair.tailscale-watcher.plist
+        KeepAlive=true / RunAtLoad=true
+      launchctl bootstrap gui/$UID
+
+阿良 中途踩两坑:
+    ① 一开始用 notifyutil -w 监听 com.apple.system.config.network_change
+       distributed notification — notifyutil -w 收到事件不写 stdout,
+       watcher 看不到事件 → 改成 30s 轮询模式,简单可靠
+    ② has_default_gw() 用 grep 'gateway:' 永远 False
+       原因: utun9 PtP 默认路由的 route -n get default 输出无
+            'gateway:' 字段,只有 'interface:'
+       → 改 grep 'interface:'
+
+阿良 端到端测试:
+    01:55:09 手动 tailscale down 模拟切网导致路由消失
+    01:55:37 watcher 30s 轮询点检测到 100.64/10 不在 utun0
+             日志: "检测到 100.64/10 不在 utun0,等 5s Shadowrocket NE 安顿"
+    01:55:42 GRACE 5s 完 → 软修开始
+             日志: "开始软修 (tailscale down + up)"
+    01:55:51 ✓ 软修成功 100.64/10 → utun0
+    总耗时 42s 全自动
+
+阿良 最终 7 项闭环确认:
+    1. watcher running PID 63959 ✓
+    2. tsfix 函数在 ~/.zshrc ✓
+    3. plist HTTPS_PROXY ✓
+    4. tailscale 5 机全在 ✓
+    5. 100.64/10 → utun0 ✓
+    6. air → 3 mac SSH 端到端三连 OK ✓
+    7. 4 mac db 三层放行全 ✓
+
+
+============================================================
+§3. 全部技术指令 cheatsheet (按场景分组)
+============================================================
+
+【场景 A】 air 完全断 Tailscale,要重新接入 (清残留 + 重登)
+────────────────────────────────────────────────────
+1. 清进程残留 (sudo, 缺哥 air Terminal 亲手或我 sudo -S):
+   sudo pkill -9 -f tailscale
+   sleep 5
+   ps aux | grep tailscale | grep -v grep
+   # 应只剩 system daemon (brew launchd 自动重拉)
+
+2. 删 state file (谨慎!! 会触发 re-register, 之后必须重走认证):
+   sudo launchctl bootout system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+   sudo rm /opt/homebrew/var/lib/tailscale/tailscaled.state
+   sudo launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+   sleep 3
+
+3. 改 plist 注 HTTPS_PROXY (核心!! 不改这步永远卡 fake-IP):
+   sudo cp /Library/LaunchDaemons/com.tailscale.tailscaled.plist{,.bak.$(date +%s)}
+   # 在 <dict> 里加:
+   #   <key>EnvironmentVariables</key>
+   #   <dict>
+   #       <key>HTTPS_PROXY</key>
+   #       <string>http://127.0.0.1:1082</string>
+   #       <key>HTTP_PROXY</key>
+   #       <string>http://127.0.0.1:1082</string>
+   #   </dict>
+   sudo launchctl bootout system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+   sudo launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+
+4. 接入 + 认证:
+   /opt/homebrew/bin/tailscale up --hostname=air
+   # 4 秒吐认证 URL,浏览器 open <URL>,登录完
+   /opt/homebrew/bin/tailscale set --ssh=true --accept-routes
+
+5. admin 控制台清理 (浏览器,缺哥手动):
+   - 删 offline 旧节点 (避免 hostname 撞挤被加 -1 后缀)
+   - 改名 air-1 → air (auto suffix 时手改 machine name)
+
+
+【场景 B】 切网后跨机 SSH 不通 (路由 bug,最常见)
+────────────────────────────────────────────────────
+症状: tailscale ping 通(P2P UDP),但 ssh 100.x timeout
+诊断: netstat -rn -f inet | grep '^100.64'
+      看到 100.64/10 → 192.168.x.x/en0 (异常,被 q6/AX3/热点 网关抢)
+      应该 100.64/10 → utun0
+
+修法 1 (B 路 tsfix 函数,手动一键):
+   tsfix    # 在 air 任意 shell 直接跑
+   # 内部: tailscale down + sleep 2 + tailscale up + sleep 5
+   # 完事路由 100.64/10 → utun0 立通
+
+修法 2 (A 路 watcher,30s 内自动修):
+   # 不需要做任何事,LaunchAgent 自动检测 + 软修
+   # 看日志: tail -f ~/Library/Logs/ts_watcher.log
+   # 期望见到:
+   #   "检测到 100.64/10 不在 utun0,等 5s Shadowrocket NE 安顿"
+   #   "开始软修 (tailscale down + up)"
+   #   "✓ 软修成功,100.64/10 → utun0"
+
+
+【场景 C】 watcher 出 bug 失控 (远程救场)
+────────────────────────────────────────────────────
+1. 一键禁用(立即生效,留进程不杀):
+   touch /tmp/ts_watcher_disable
+   # watcher 下个轮询周期看到这个文件 → 跳过所有 fix
+
+2. 完全卸载:
+   launchctl bootout gui/501/com.kenair.tailscale-watcher
+   rm -f /tmp/ts_watcher_disable
+   # 之后用 tsfix 函数手动救
+
+3. 远程从其他机:
+   ssh kenair@<air-IP> "touch /tmp/ts_watcher_disable"
+
+
+【场景 D】 4 mac db 100.64 配置审计 (绣虎/阿良巡检)
+────────────────────────────────────────────────────
+DB 路径: ~/Library/Containers/com.liguangming.Shadowrocket/
+         Data/Documents/Databases/default.db
+
+# 跑全 4 mac 检查 (在 air 上跑):
+for h in "100.70.22.7:kenchoimini:mini" \
+         "100.68.57.96:kenchoios:neo" \
+         "100.96.153.17:kenchoineo2:neo2"; do
+  IFS=':' read -r ip user nick <<< "$h"
+  echo "=== $nick ==="
+  ssh -o BatchMode=yes "$user@$ip" "sqlite3 \
+    ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db \
+    \"SELECT docid, name, value FROM config WHERE name IN ('skip-proxy',
+    'tun-excluded-routes') AND value LIKE '%100.64%';\""
+done
+
+# 单机本地检查 (air 自查):
+sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db \
+  "SELECT docid, name, value FROM config WHERE docid IN (2,3);"
+
+
+【场景 E】 mini 缺 docid=2 100.64 (补漏 SQL,以备别机也缺)
+────────────────────────────────────────────────────
+# 备份
+ssh kenchoimini@100.70.22.7 "cd ~/Library/Containers/com.liguangming.\
+Shadowrocket/Data/Documents/Databases && cp default.db \
+default.db.bak.skipproxy_100x_$(date +%Y%m%d_%H%M%S)"
+
+# UPDATE (注意保留 mini 自己的 *.eastmoney.com 两条!!)
+ssh kenchoimini@100.70.22.7 "sqlite3 \
+~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db \
+\"UPDATE config SET value='192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, \
+100.64.0.0/10, localhost, *.local, captive.apple.com, \
+*.eastmoney.com, push2.eastmoney.com' WHERE docid=2;\""
+
+# 验证
+ssh kenchoimini@100.70.22.7 'sqlite3 \
+~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db \
+"PRAGMA integrity_check; SELECT value FROM config WHERE docid=2;"'
+
+
+【场景 F】 加 Rule 段 IP-CIDR 100.64 兜底 (air 已加,其他可选)
+────────────────────────────────────────────────────
+# 备份
+cp ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/\
+Databases/default.db{,.bak.tailscale_direct_$(date +%Y%m%d_%H%M%S)}
+
+# INSERT (走 FTS3 虚表,自动同步索引)
+sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/\
+Databases/default.db \
+  "INSERT INTO config(section, name, value, option, ext, remarks, created) \
+   VALUES('rule', 'IP-CIDR', '100.64.0.0/10', 'DIRECT', 'no-resolve', '', \
+          CAST(strftime('%s','now') AS INTEGER));"
+
+# 完整性 + 验证
+sqlite3 .../default.db "INSERT INTO config(config) VALUES('integrity-check'); \
+                       PRAGMA integrity_check;"
+sqlite3 .../default.db "SELECT docid, name, value FROM config_content \
+                       WHERE c2value='100.64.0.0/10';"
+
+注意: c6created 给当前时间戳确保排到 Rule 段最顶 (Shadowrocket 按 created
+DESC 评估,不是 docid)。Shadowrocket NE 不会立刻 reload,等自然重启
+(切配置/系统重启) 加载,平时不影响功能(skip-proxy + tun-excluded-routes
+两层已生效)。
+
+
+【场景 G】 SSH 互信丢失 (air reauth 后)
+────────────────────────────────────────────────────
+症状: air → mini/neo/neo2 SSH "Permission denied (publickey,password)"
+原因: air SSH host pubkey 变了 (kenair@KenChoiair → kenair@Air),
+      对端 authorized_keys 不认。
+
+修法(从有 SSH 互信的中转机干,如台机):
+PUB=$(ssh kenair@<air-IP> "cat ~/.ssh/id_ed25519.pub")
+for h in kenchoios@100.68.57.96 kenchoimini@100.70.22.7 \
+         kenchoineo2@100.96.153.17; do
+  ssh "$h" "if grep -q '$(echo "$PUB" | awk '{print $2}')' \
+            ~/.ssh/authorized_keys 2>/dev/null; then \
+              echo '$h 已有'; \
+            else \
+              echo '$PUB' >> ~/.ssh/authorized_keys && echo '$h 追加成功'; \
+            fi"
+done
+
+
+【场景 H】 一键三查脚本 (压力测试用)
+────────────────────────────────────────────────────
+cat > /tmp/ts_check.sh << 'SCRIPT'
+#!/bin/bash
+LABEL="${1:-当前}"
+echo "============================================================"
+echo "  Tailscale 三查验证 — 网络: $LABEL  时间: $(date '+%H:%M:%S')"
+echo "============================================================"
+echo "--- 网络环境 ---"
+SSID=$(networksetup -getairportnetwork en0 2>/dev/null | sed 's/^[^:]*: //')
+echo "WiFi SSID: $SSID"
+echo "en0 IPv4: $(ifconfig en0 2>/dev/null | awk '/inet /{print $2; exit}')"
+echo "默认路由: $(netstat -rn | awk '/^default/{print $2,$NF; exit}')"
+echo ""
+echo "--- 第一查: plist HTTPS_PROXY 走 1082 通 controlplane ---"
+curl -x http://127.0.0.1:1082 https://controlplane.tailscale.com/health -m 10 \
+     -sS -w "[HTTP %{http_code}, time=%{time_total}s, size=%{size_download}B]\n"
+echo ""
+echo "--- 第二查: tailscale 数据面 ---"
+echo "[status]"
+/opt/homebrew/bin/tailscale status 2>&1 | head -7
+echo "[ping ken-choi]"
+/opt/homebrew/bin/tailscale ping -c 2 -timeout 5s 100.86.79.39 2>&1 | head -3
+echo "[netcheck]"
+/opt/homebrew/bin/tailscale netcheck 2>&1 | grep -E "UDP:|IPv4:|IPv6:|MappingVaries|Nearest DERP|hkg:|sfo:" | head -8
+echo ""
+echo "--- 第三查: Shadowrocket db 三层放行 ---"
+sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db \
+  "SELECT docid, name, CASE WHEN value LIKE '%100.64.0.0/10%' THEN '✓ 含 100.64.0.0/10' ELSE '✗ 缺 100.64' END FROM config WHERE docid IN (2,3);"
+echo ""
+echo "--- 跨机 TCP 抽测 (5s timeout) ---"
+for hp in "100.86.79.39:ken-choi" "100.70.22.7:mini" "100.68.57.96:neo" "100.96.153.17:neo2"; do
+  ip=${hp%:*}; nick=${hp##*:}
+  if nc -G 5 -z $ip 22 >/dev/null 2>&1; then
+    echo "  ✓ $nick ($ip:22) 通"
+  else
+    echo "  ✗ $nick ($ip:22) 不通"
+  fi
+done
+echo "============================================================"
+SCRIPT
+chmod +x /tmp/ts_check.sh
+
+# 跑:
+/tmp/ts_check.sh "label-name"
+
+
+============================================================
+§4. 跟绣虎对话节录 (关键决策点)
+============================================================
+
+【绣虎诊断 5 进程冲突】
+绣虎: "找到根因 — air 上 5 个 tailscale 相关进程并存互相冲突
+      508/3432/3436/4371/60079... 两个 tailscaled + sudo 卡 stdin =
+      tailscale up 不知道连哪个 socket,所以无 URL 输出。
+      清理只能你本地 sudo 操作 (我 ssh 没密码 kill 不了 sudo/root 进程)。"
+
+缺哥: "我让阿良来跑,是他傻逼带他出去之后他连回来瞎几把搞的"
+
+【阿良误判 + 缺哥泄密 + 接手】
+阿良 误把 daemon 没吐 URL 归因于 state file 残留,删了不修。
+缺哥 在 chat 里贴 sudo 密码 (geng7997)。
+阿良 立刻警告改密码,但密码不再变。
+缺哥 "n放弃,你来搞" 让阿良用密码自动化处理。
+阿良 用 sudo -S 加 stdin 密码自动化跑 bootout/rm/bootstrap。
+
+【绣虎建议 airLE — 阿良修正】
+绣虎: "让阿良在 air 上跑(这次不跟旧 air 冲突):
+      tailscale up --hostname=airLE --ssh"
+阿良: "airLE 是新名字,会注册成 airLE 而不是 air,且 admin 端缺哥
+       已手改成 air 了,重新 up 会再注册新节点。--ssh 开内置 SSH 是好主意,
+       但 tailscale set --ssh=true 不需要重新 up,不触发 reauth。"
+落地: tailscale set --ssh=true (不动 hostname)
+
+【绣虎裁判 plist 方案】
+绣虎: "✅ 达成 + 不需补
+      ① plist HTTPS_PROXY: daemon 控制面 ✓
+      ② db docid=2 skip-proxy 100.64.0.0/10: 系统层放行 ✓
+      ③ db docid=3 tun-excluded-routes 100.64.0.0/10: TUN 层放行 ✓
+      ④ db docid=667 Rule 段(你刚加): Rule 层冗余兜底 🟡 等自然 reload
+
+      仅 air 装 plist,不预防性回灌 mini/neo/neo2。理由:
+      装 plist 反而引入 Shadowrocket 1082 必须活的硬依赖。
+
+      db skip-proxy 100.64.0.0/10 要验证 4 mac 是否都有
+      (按记忆 feedback_shadowrocket_skip_proxy.md 立的就是这条)。"
+
+【绣虎指令 灌 pubkey】
+绣虎: "neo SSH 互信走方案 B 台机中转 (不动 neo Tailscale)
+      为什么不走 A (ssh-copy-id): air 上不能交互输 neo 密码
+      为什么不走 C (tailscale up --ssh): neo 当前在跑文章定时
+                                          (前面 ETA 算到明天),动 Tailscale 会断进程
+      方案 B: 台机这边把 air pubkey 灌进 neo authorized_keys
+              我(绣虎)直接干,阿良不用动。"
+
+【绣虎闭环 + 阿良升级 互补不冲突】
+绣虎: "阿良那边升级 feedback_tailscale_daemon_https_proxy.md
+      (plist 实操 + Rule c6created 排序 + tailscale down/up 软修),
+      跟我这两条互补不冲突。"
+分工:
+  绣虎: feedback_shadowrocket_skip_proxy.md (大改)
+  绣虎: feedback_Mac出门归来三查清单.md (新立)
+  绣虎: feedback_跨机协同作战分工.md (新立)
+  阿良: feedback_tailscale_daemon_https_proxy.md (升级)
+  阿良: 故障说明_2026-05-06.txt (新立)
+  阿良: 帮忙 push 绣虎 5-04 卡的 v1102 commit (路径迁移到 大记忆术/记忆共享/)
+
+【绣虎四网铁律 commit f929cb9】
+四网(q6/5G/4G/AX3 切回)实测铁律:
+  切网必复现路由 100.64/10 → 网关/en0 抢占 bug
+  无例外,包括家里 AX3 切回
+  软修 tailscale down/up 万能,30s 内恢复
+
+【绣虎三选一 阿良判 A+B 双轨】
+绣虎: "三个走法:
+      A. launchd watcher 自动化 (network_change 监听 + 防抖)
+      B. ~/.zshrc tsfix 函数 (手动一键)
+      C. 靠记忆 + 三查清单提醒 (零成本但靠记)
+      你判断哪条划算 + 指出我没看到的边界。"
+阿良: "A+B 双轨。A 主路,B 兜底,C 不选。
+      你没看到的 5 条边界:
+      ① Shadowrocket NE 时序冲突 (sleep 5-8s 给 NE 时间)
+      ② 防抖 (SSID 漂移会触发多次 network_change)
+      ③ 断网判断 (无可达网关跳过避免噪音)
+      ④ 已修就跳 (避免无谓 down/up)
+      ⑤ Kill switch (远程一键禁用防自杀)"
+缺哥: "AB 干。"
+
+
+============================================================
+§5. 落地清单 (今晚最终所有变更)
+============================================================
+
+【air 本机】(不在 git 仓库,本机 sudo 操作)
+  /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+    + EnvironmentVariables HTTPS_PROXY=http://127.0.0.1:1082
+    + 备份 .bak.1777999342
+
+  ~/Library/Containers/com.liguangming.Shadowrocket/
+    Data/Documents/Databases/default.db
+    + Rule 段 docid=667 IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+    + 备份 default.db.bak.tailscale_direct_20260506_005611
+
+  ~/.zshrc
+    + tsfix() 函数 (B 路一键软修)
+
+  ~/.config/ts-watcher/ts-watcher.py
+    新建 (A 路 30s 轮询 watcher Python 主脚本)
+
+  ~/Library/LaunchAgents/com.kenair.tailscale-watcher.plist
+    新建 (LaunchAgent KeepAlive=true RunAtLoad=true)
+
+  ~/Library/Logs/ts_watcher.log (运行日志)
+
+【mini 远端】(从 air ssh 改的)
+  ~/Library/Containers/com.liguangming.Shadowrocket/
+    Data/Documents/Databases/default.db
+    UPDATE docid=2 skip-proxy: 在 172.16.0.0/12 后插入 100.64.0.0/10
+    备份 default.db.bak.skipproxy_100x_20260506_010910
+
+【neo / mini / neo2 远端】(从台机绣虎灌的)
+  ~/.ssh/authorized_keys
+    + ssh-ed25519 ... kenair@Air (air 新 ed25519 pubkey)
+
+【tailscale admin 控制台】(缺哥 浏览器手动)
+  - 删 air (100.67.252.1, offline 1d)
+  - 删 kenchoiair (100.114.112.10, offline 15m)
+  - 改名 air-1 → air
+
+【git 仓库】(已 push 上 origin/main, branch main)
+  + 大记忆术/记忆共享/feedback_tailscale_daemon_https_proxy.md (升级)
+    commit 95fcc5d
+  + 大记忆术/记忆共享/project_v1102_meaning.md (绣虎 5-04 烂尾恢复)
+    commit b78477c (Author: Ken Choi Air, Date: Mon May 4 18:31:35 2026)
+  + 自动发布/故障说明/故障说明_2026-05-06.txt (新立每日)
+    commit 95fcc5d
+
+  绣虎那边 (在我之前 + 之后 push):
+  + 大记忆术/win台机/feedback_shadowrocket_skip_proxy.md (大改)
+    commit 5b85b1a
+  + 大记忆术/win台机/feedback_Mac出门归来三查清单.md (新立)
+    commit 5b85b1a
+  + 大记忆术/win台机/feedback_跨机协同作战分工.md (新立)
+    commit b068944
+  + 大记忆术/win台机/MEMORY.md (索引更新)
+    commit 5b85b1a + b068944
+  + 大记忆术/win台机/feedback_Mac出门归来三查清单.md (四网铁律追加)
+    commit f929cb9
+
+
+============================================================
+§6. 出门 cheatsheet (缺哥再带 air 出门时怎么用)
+============================================================
+
+【日常自动化(无需操作)】
+
+A 路 watcher 已开机自启(KeepAlive=true RunAtLoad=true),
+切任何网络 30s 内自动修。
+
+  - 切 SSID/热点/4G/5G/咖啡馆 WiFi → 不用管,30 秒自动恢复
+  - 看日志: tail -f ~/Library/Logs/ts_watcher.log
+
+【手动一键(B 路 兜底)】
+
+shell 里直接跑 tsfix 函数(已加在 ~/.zshrc):
+
+  $ tsfix
+
+立通,5-8 秒。期望输出:
+  [tsfix] tailscale down ...
+  [tsfix] tailscale up ...
+  [tsfix] 路由表 100.x:
+  100.64/10          utun0              USc                 utun0
+  100.100.100.100/32 utun0              USc                 utun0
+  100.126.82.58      100.126.82.58      UH                  utun0
+  [tsfix] ping ken-choi:
+  pong from ken-choi (100.86.79.39) via [...]:41641 in <100ms
+
+【极少数情况 watcher 失控】
+
+a. 立即禁用(留进程):
+    $ touch /tmp/ts_watcher_disable
+
+b. 完全卸载:
+    $ launchctl bootout gui/501/com.kenair.tailscale-watcher
+    $ rm -f /tmp/ts_watcher_disable
+
+c. 之后用 tsfix 救场。
+
+【遇到看不懂的故障三查】
+
+详见 大记忆术/win台机/feedback_Mac出门归来三查清单.md (绣虎维护)
+
+简版三查 (tsfix 失败时手动诊断):
+
+  1. 先验 daemon 控制面:
+     curl -x http://127.0.0.1:1082 https://controlplane.tailscale.com/health -m 10
+     # 期望: HTTP 404 / 1-3s (TLS 通,404 是 endpoint 不接 GET)
+     # 失败 → plist HTTPS_PROXY 出问题
+
+  2. 验跨机 P2P:
+     /opt/homebrew/bin/tailscale ping -c 2 100.86.79.39
+     # 期望: pong via [...]:41641 in <100ms (IPv6/LAN P2P)
+     # 走 DERP(sfo) → P2P 还在协商,等 1-2 分钟会切到 P2P
+
+  3. 验跨机 TCP 端到端:
+     ssh kenchoimini@100.70.22.7 "echo OK"
+     # 期望: OK
+     # timeout → 路由表 100.64/10 没在 utun0,跑 tsfix
+
+
+============================================================
+§7. 教训 / 不要踩的弯路 / 出门前提醒
+============================================================
+
+【不要做的事】(从血泪教训提炼)
+
+❌ 不要 quit Shadowrocket
+   - 自己出墙能力同时挂,Anthropic API 也不通,阿良失声
+   - air 浏览器无法访问 login.tailscale.com 认证页
+
+❌ 不要 sudo tailscale up --reset
+   - 触发 daemon logout 强制 web 重新认证
+   - 旧 hostname 可能被 admin 后台占用,自动加 -1 后缀
+   - 5-05 阿良走过这条路,搞出 3 个 air 节点 admin 清理一晚上
+
+❌ 不要 改 hostname 规避冲突 (如 airLE)
+   - admin 后台显示就是 airLE,magic DNS 不一致
+   - 正解: 缺哥 admin 手改 machine name
+
+❌ 不要 改 /etc/hosts 写真 IP
+   - 默认路由还是 utun9 (Shadowrocket TUN 抢)
+   - TCP 包照样被 Shadowrocket 拦,等于白做
+
+❌ 不要 DNS over HTTPS / dig @8.8.8.8
+   - 53 端口被 utun9 拦,直连 DNS 不通
+
+❌ 不要 删 state file 后期望 daemon 自己起来
+   - 5-06 阿良踩过,删了反而触发重新 register,撞上 fake-IP
+
+❌ 不要 凭 tailscale ping 通就以为没事
+   - ping 走 UDP 41641 P2P 打洞,不依赖系统路由表
+   - 跨机 TCP (SSH/scp/dispatch.py) 走系统路由,完全不同链路
+   - 真验证靠跨机 ssh "echo OK"
+
+❌ 不要 在 chat 里贴 sudo 密码
+   - 5-06 缺哥贴过一次,阿良立刻警告改密码
+   - 密码本身有缓存,要在 air Terminal 里输
+
+❌ 不要 用 tailscale ssh wrapper 跨机
+   - wrapper 反查 IP→hostname 走系统 ssh,被 fake-DNS 拦成 198.18.x
+   - 直连 ssh kenchoiXXX@100.x 即可 (详见 feedback_shadowrocket_skip_proxy.md)
+
+【出门前提醒(预防胜于救场)】
+
+✓ 出门前在 air 上跑一次 tsfix,确保路由 100.64/10 → utun0 状态干净
+✓ 验证 watcher 还活: launchctl print gui/501/com.kenair.tailscale-watcher | grep state
+✓ 备份 plist + db (定期):
+    sudo cp /Library/LaunchDaemons/com.tailscale.tailscaled.plist{,.bak.$(date +%s)}
+    cp ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db{,.bak.$(date +%s)}
+✓ 记一下当前 air 的 ed25519 pubkey,万一回家还要补 SSH 互信:
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16AHXIHG/LhGxuK5uk5J9J kenair@Air
+
+
+============================================================
+§8. 全程时长 + 协作模式
+============================================================
+
+总时长:    2026-05-05 晚 ~ 2026-05-06 01:55 (~5 小时)
+
+阶段时长:
+  - 故障潜伏期:                  ~3 小时 (缺哥出门到回家)
+  - 阶段 1-2 清残留 + 抓真因:    7 分钟  (00:30-00:37)
+  - 阶段 3-4 plist + 接入:       8 分钟  (00:37-00:45)
+  - 阶段 5-6 db 三层 + 验证:    20 分钟 (00:50-01:10)
+  - 阶段 7-9 软修 + 互信 + 矩阵: 5 分钟 (01:00-01:13)
+  - 阶段 10 写记忆 + push:      10 分钟 (01:15-01:25)
+  - 阶段 11 四网压力测试:        17 分钟 (01:25-01:42)
+  - 阶段 12 A+B 双轨自动化:      13 分钟 (01:42-01:55)
+
+协作模式: 三人配合
+  - 缺哥(指挥):
+        网络切换 / sudo 密码 / admin GUI 操作 / 决策点拍板
+  - 绣虎(台机, Win 机器,跑 Win 文章定时主力):
+        远程定根因 / 跨机灌 pubkey (因为 air 上不能交互输密码) /
+        写 win台机/ 记忆 / 复查 / 裁判 / 下指令
+  - 阿良(air, 当前会话):
+        本机 sudo 操作 / 数据面诊断 / 写 共享/记忆 / 落地脚本
+
+详见 大记忆术/win台机/feedback_跨机协同作战分工.md (绣虎维护)
+
+
+============================================================
+§9. 完整指令逐条复盘 (无脑可抄)
+============================================================
+
+[阶段 1] 清进程残留
+─────────────────────────────────────
+sudo pkill -9 -f tailscale
+sleep 5
+ps aux | grep tailscale | grep -v grep
+
+[阶段 2] 删 state file (谨慎)
+─────────────────────────────────────
+SUDOPASS='geng7997'
+echo "$SUDOPASS" | sudo -S launchctl bootout system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+echo "$SUDOPASS" | sudo -S rm -v /opt/homebrew/var/lib/tailscale/tailscaled.state
+echo "$SUDOPASS" | sudo -S launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+sleep 4
+
+[阶段 3] 改 plist 注 HTTPS_PROXY
+─────────────────────────────────────
+SUDOPASS='geng7997'
+NEW_PLIST='<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tailscale.tailscaled</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/tailscale/bin/tailscaled</string>
+        <string>--state=/opt/homebrew/var/lib/tailscale/tailscaled.state</string>
+        <string>--socket=/var/run/tailscaled.socket</string>
+        <string>--port=41641</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HTTPS_PROXY</key>
+        <string>http://127.0.0.1:1082</string>
+        <key>HTTP_PROXY</key>
+        <string>http://127.0.0.1:1082</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/tailscaled.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/tailscaled.err.log</string>
+</dict>
+</plist>'
+echo "$NEW_PLIST" > /tmp/ts_plist.xml
+echo "$SUDOPASS" | sudo -S cp /Library/LaunchDaemons/com.tailscale.tailscaled.plist{,.bak.$(date +%s)}
+echo "$SUDOPASS" | sudo -S cp /tmp/ts_plist.xml /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+echo "$SUDOPASS" | sudo -S chmod 644 /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+echo "$SUDOPASS" | sudo -S chown root:wheel /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+echo "$SUDOPASS" | sudo -S launchctl bootout system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+sleep 2
+echo "$SUDOPASS" | sudo -S launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+sleep 4
+
+[阶段 4] 接入 + 认证
+─────────────────────────────────────
+nohup /opt/homebrew/bin/tailscale up --hostname=air > /tmp/ts_up.log 2>&1 &
+sleep 5
+cat /tmp/ts_up.log    # 看到 "https://login.tailscale.com/a/..." URL
+open "<URL>"          # 浏览器打开认证页,登录完
+# 等 daemon 自动注册成功
+
+# 浏览器 admin 控制台手动:
+# https://login.tailscale.com/admin/machines
+# - 删 offline 旧节点
+# - 改 air-1 → air
+
+# 设置 SSH + accept-routes (不重新 up):
+/opt/homebrew/bin/tailscale set --hostname=air --accept-routes
+/opt/homebrew/bin/tailscale set --ssh=true
+
+[阶段 6] 加 Rule 段 IP-CIDR 100.64
+─────────────────────────────────────
+DB="$HOME/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db"
+cp "$DB" "${DB}.bak.tailscale_direct_$(date +%Y%m%d_%H%M%S)"
+sqlite3 "$DB" "INSERT INTO config(section, name, value, option, ext, remarks, created) \
+               VALUES('rule', 'IP-CIDR', '100.64.0.0/10', 'DIRECT', 'no-resolve', '', \
+                      CAST(strftime('%s','now') AS INTEGER));"
+sqlite3 "$DB" "INSERT INTO config(config) VALUES('integrity-check');"
+sqlite3 "$DB" "PRAGMA integrity_check;"
+sqlite3 "$DB" "SELECT docid, name, value FROM config_content WHERE c2value='100.64.0.0/10';"
+
+[阶段 7] 软修路由
+─────────────────────────────────────
+/opt/homebrew/bin/tailscale down
+sleep 2
+/opt/homebrew/bin/tailscale up &
+sleep 5
+kill %1 2>/dev/null
+sleep 2
+netstat -rn -f inet | grep '^100\.'
+
+[阶段 8] SSH 互信 (从台机)
+─────────────────────────────────────
+PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16AHXIHG/LhGxuK5uk5J9J kenair@Air"
+ssh kenchoios@100.68.57.96 "echo '$PUB' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+for h in kenchoimini@100.70.22.7 kenchoineo2@100.96.153.17; do
+  ssh "$h" "if grep -q 'AAAAC3NzaC1lZDI1NTE5AAAAIEr/8sHfdQVwVHzlZ4C6fu16AHXIHG/LhGxuK5uk5J9J' \
+              ~/.ssh/authorized_keys 2>/dev/null; then echo '$h 已存在'; \
+            else echo '$PUB' >> ~/.ssh/authorized_keys && echo '$h 追加成功'; fi"
+done
+
+[阶段 9] mini docid=2 补漏 (从 air)
+─────────────────────────────────────
+ssh kenchoimini@100.70.22.7 "cd ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases && cp default.db default.db.bak.skipproxy_100x_$(date +%Y%m%d_%H%M%S)"
+ssh kenchoimini@100.70.22.7 "sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db \"UPDATE config SET value='192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, localhost, *.local, captive.apple.com, *.eastmoney.com, push2.eastmoney.com' WHERE docid=2;\""
+ssh kenchoimini@100.70.22.7 'sqlite3 ~/Library/Containers/com.liguangming.Shadowrocket/Data/Documents/Databases/default.db "PRAGMA integrity_check; SELECT value FROM config WHERE docid=2;"'
+
+[阶段 12] B 路 tsfix 函数
+─────────────────────────────────────
+# 编辑 ~/.zshrc 追加:
+cat >> ~/.zshrc << 'EOF'
+
+# tsfix: Tailscale 切网软修一键
+tsfix() {
+    echo "[tsfix] tailscale down ..."
+    /opt/homebrew/bin/tailscale down
+    sleep 2
+    echo "[tsfix] tailscale up ..."
+    /opt/homebrew/bin/tailscale up &
+    local UPPID=$!
+    sleep 5
+    kill $UPPID 2>/dev/null
+    sleep 2
+    echo "[tsfix] 路由表 100.x:"
+    netstat -rn -f inet | grep -E '^100\.' | head -5
+    echo "[tsfix] ping ken-choi:"
+    /opt/homebrew/bin/tailscale ping -c 1 -timeout 5s 100.86.79.39 2>&1 | head -1
+}
+EOF
+
+[阶段 12] A 路 watcher 安装
+─────────────────────────────────────
+mkdir -p ~/.config/ts-watcher
+mkdir -p ~/Library/Logs
+
+# 1. 写 ~/.config/ts-watcher/ts-watcher.py (见 §10 完整代码)
+# 2. 写 ~/Library/LaunchAgents/com.kenair.tailscale-watcher.plist (见 §10)
+# 3. 加载:
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.kenair.tailscale-watcher.plist
+
+# 验证:
+launchctl print gui/$UID/com.kenair.tailscale-watcher | grep -E "state|pid ="
+ps aux | grep ts-watcher | grep -v grep
+tail -f ~/Library/Logs/ts_watcher.log
+
+# 卸载:
+launchctl bootout gui/$UID/com.kenair.tailscale-watcher
+
+# 紧急禁用 (留进程):
+touch /tmp/ts_watcher_disable
+# 启用回:
+rm /tmp/ts_watcher_disable
+
+
+============================================================
+§10. 关键代码片段 (plist / Python watcher / zshrc 函数)
+============================================================
+
+【~/.config/ts-watcher/ts-watcher.py】 (A 路 主脚本)
+────────────────────────────────────────────────────
+#!/usr/bin/env python3
+"""Tailscale 切网自动软修 watcher (air, A 路自动化)
+
+每 POLL 秒检查路由表,发现 100.64/10 不在 utun0 时跑
+`tailscale down + up` 软修。覆盖任何切网/唤醒场景,
+最坏 POLL 秒内修好。
+
+设计要点 (跟绣虎商定的 5 条边界):
+1. Shadowrocket NE 时序:发现需要修后 sleep GRACE 秒,
+   等 NE 写完路由再修
+2. 防抖:轮询天然串行,不存在嵌套触发
+3. 断网判断:无可达默认网关跳过 (避免 daemon retry 噪音)
+4. 条件触发:100.64/10 已 → utun0 时无声跳过 (无日志噪音)
+5. Kill switch:/tmp/ts_watcher_disable 存在则跳过 (远程一键禁用)
+"""
+import logging
+import os
+import subprocess
+import time
+
+POLL = 30      # 轮询间隔 (秒)
+GRACE = 5      # 发现需要修后等 5s 让 Shadowrocket NE 把它的路由写完再修
+KILL = "/tmp/ts_watcher_disable"
+TS = "/opt/homebrew/bin/tailscale"
+LOG = os.path.expanduser("~/Library/Logs/ts_watcher.log")
+
+logging.basicConfig(
+    filename=LOG, level=logging.INFO,
+    format="%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+
+def needs_fix() -> bool:
+    """100.64/10 没指向 utun0 时返回 True"""
+    out = subprocess.run(
+        ["netstat", "-rn", "-f", "inet"],
+        capture_output=True, text=True,
+    ).stdout
+    for line in out.splitlines():
+        if line.startswith("100.64/10") and "utun0" in line:
+            return False
+    return True
+
+
+def has_default_route() -> bool:
+    """有默认路由 (interface 字段) 时返回 True;
+    注意:utun9 这种 PtP 默认路由无 'gateway:' 字段,只有 'interface:',
+    所以判断 interface: 而非 gateway:"""
+    out = subprocess.run(
+        ["route", "-n", "get", "default"],
+        capture_output=True, text=True,
+    ).stdout
+    return "interface:" in out
+
+
+def run_fix() -> None:
+    if os.path.exists(KILL):
+        logging.info("kill switch %s 存在,本轮跳过", KILL)
+        return
+    if not has_default_route():
+        return  # 完全断网,无声跳过
+    if not needs_fix():
+        return  # 路由正常,无声跳过 (避免日志噪音)
+
+    logging.info("检测到 100.64/10 不在 utun0,等 %ds Shadowrocket NE 安顿", GRACE)
+    time.sleep(GRACE)
+    if not needs_fix():
+        logging.info("等待期间路由自己恢复,跳过")
+        return
+
+    logging.info("开始软修 (tailscale down + up)")
+    try:
+        subprocess.run([TS, "down"], timeout=10)
+        time.sleep(2)
+        up = subprocess.Popen([TS, "up"])
+        time.sleep(5)
+        if up.poll() is None:
+            up.terminate()
+        time.sleep(2)
+    except Exception as e:
+        logging.warning("软修异常: %s", e)
+        return
+
+    if not needs_fix():
+        logging.info("✓ 软修成功,100.64/10 → utun0")
+    else:
+        logging.warning("✗ 软修后路由仍未恢复,需人工")
+
+
+def main() -> None:
+    logging.info("=== ts-watcher 启动 (PID=%d, 轮询 %ds) ===", os.getpid(), POLL)
+    while True:
+        try:
+            run_fix()
+        except Exception as e:
+            logging.warning("主循环异常: %s", e)
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    main()
+
+
+【~/Library/LaunchAgents/com.kenair.tailscale-watcher.plist】
+────────────────────────────────────────────────────
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kenair.tailscale-watcher</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/kenair/.config/ts-watcher/ts-watcher.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/kenair/Library/Logs/ts_watcher.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kenair/Library/Logs/ts_watcher.stderr.log</string>
+</dict>
+</plist>
+
+
+【~/.zshrc tsfix 函数】 (B 路 兜底)
+────────────────────────────────────────────────────
+# tsfix: Tailscale 切网软修一键 (B 路兜底,A 路自动化在 ~/Library/LaunchAgents/com.kenair.tailscale-watcher.plist)
+tsfix() {
+    echo "[tsfix] tailscale down ..."
+    /opt/homebrew/bin/tailscale down
+    sleep 2
+    echo "[tsfix] tailscale up ..."
+    /opt/homebrew/bin/tailscale up &
+    local UPPID=$!
+    sleep 5
+    kill $UPPID 2>/dev/null
+    sleep 2
+    echo "[tsfix] 路由表 100.x:"
+    netstat -rn -f inet | grep -E '^100\.' | head -5
+    echo "[tsfix] ping ken-choi:"
+    /opt/homebrew/bin/tailscale ping -c 1 -timeout 5s 100.86.79.39 2>&1 | head -1
+}
+
+
+【/Library/LaunchDaemons/com.tailscale.tailscaled.plist】 (含 HTTPS_PROXY 注入)
+────────────────────────────────────────────────────
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tailscale.tailscaled</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/tailscale/bin/tailscaled</string>
+        <string>--state=/opt/homebrew/var/lib/tailscale/tailscaled.state</string>
+        <string>--socket=/var/run/tailscaled.socket</string>
+        <string>--port=41641</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HTTPS_PROXY</key>
+        <string>http://127.0.0.1:1082</string>
+        <key>HTTP_PROXY</key>
+        <string>http://127.0.0.1:1082</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/tailscaled.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/tailscaled.err.log</string>
+</dict>
+</plist>
+
+
+============================================================
+§11. 验证数据 (四网三查矩阵原始输出)
+============================================================
+
+【AX3 baseline (会话开始) — 01:26】
+────────────────────────────────────────
+WiFi SSID: You are not associated with an AirPort network.
+en0 IPv4: 192.168.10.239 (网段从 192.168.3 → 192.168.10)
+默认路由: link#24 utun9
+HTTPS_PROXY: HTTP 404 / 1.90s ✓
+tailscale ping ken-choi: direct via [240e:3b2:e237:5302:8585:6488:19ad:1481]:41641 in 28ms ✓
+Nearest DERP: Hong Kong 31.6ms
+db 三层: docid=2 ✓ docid=3 ✓
+跨机 TCP: 全 fail ✗ (路由 100.64/10 → 192.168.10.1/en0 异常)
+
+【q6 网络 — 01:27】
+────────────────────────────────────────
+en0 IPv4: 192.168.10.239
+HTTPS_PROXY: HTTP 404 / 1.75s ✓
+tailscale ping: direct via IPv6 27ms ✓
+Nearest DERP: Hong Kong 47.7ms
+路由(切网直后异常): 100.64/10 → 192.168.10.1/en0
+跨机 TCP: 全 fail ✗
+软修 tailscale down/up:
+  路由(修后): 100.64/10 → utun0 ✓
+  跨机 SSH: mini ✓ neo ✓ neo2 ✓ (ken-choi Win 不通,基线就 fail)
+
+【5G 热点 — 01:32】
+────────────────────────────────────────
+en0 IPv4: 172.20.10.6 (iPhone 个人热点典型 NAT 段 172.20.10.0/28)
+HTTPS_PROXY: HTTP 404 / 3.57s ✓ (慢一倍)
+tailscale ping ken-choi:
+  第一次: via DERP(sfo) 2.96s ⚠️ (走美国中转)
+  第二次: via [IPv6]:41641 81ms ✓ (P2P 协商完毕切回)
+Nearest DERP: Hong Kong 74ms
+NAT: MappingVariesByDestIP=true (Hard/Symmetric NAT, P2P 难)
+跨机 TCP: 全 fail ✗
+软修后 SSH 三连 OK ✓
+
+【4G 热点 — 01:35】
+────────────────────────────────────────
+en0 IPv4: 172.20.10.5
+HTTPS_PROXY: HTTP 404 / 2.22s ✓
+tailscale ping ken-choi:
+  第一次: via DERP(sfo) 3.29s ⚠️
+  第二次: via [IPv6]:41641 115ms ✓
+Nearest DERP: Hong Kong 84.6ms
+NAT: MappingVariesByDestIP=true
+跨机 TCP: 全 fail ✗
+软修后 SSH 三连 OK ✓
+
+【AX3 切回 — 01:40】
+────────────────────────────────────────
+en0 IPv4: 192.168.3.7 (回到家里 LAN)
+HTTPS_PROXY: HTTP 404 / 1.81s ✓
+tailscale ping ken-choi: via 192.168.1.4:8650 (LAN P2P) 8ms direct ✓
+  注: AX3 段下走 LAN IPv4 直连,不是 IPv6 (同 LAN 内打洞)
+Nearest DERP: San Francisco 161.1ms (回到电信路径)
+路由(切网直后异常): 100.64/10 → 192.168.3.1/en0
+跨机 TCP: 全 fail ✗ (家里也复现!!)
+软修后 SSH 三连 OK ✓
+
+【watcher A 路 端到端测试 — 01:55】
+────────────────────────────────────────
+01:55:09 手动 tailscale down (模拟切网导致 100.64 路由消失)
+01:55:37 watcher 30s 轮询点检测到 100.64/10 不在 utun0
+01:55:42 GRACE 5s 完 → 软修开始
+01:55:51 ✓ 软修成功 100.64/10 → utun0
+总耗时: 42s 全自动 (POLL 30s + GRACE 5s + fix ~7s)
+
+【最终 7 项闭环确认 — 01:56】
+────────────────────────────────────────
+1. watcher running PID 63959 ✓
+2. tsfix 函数在 ~/.zshrc ✓
+3. plist HTTPS_PROXY ✓
+4. tailscale 5 机全在 (air/ken-choi/mini/neo/neo2) ✓
+5. 100.64/10 → utun0 ✓
+6. air → 3 mac SSH 端到端三连 OK ✓
+7. 4 mac db 三层放行全 ✓
+
+
+============================================================
+本文档版本: v1 (2026-05-06 01:55)
+更新规则:   后续出门若发现新坑 / 新解法,直接在本文末尾 append 时间戳条目
+            重大修订重新立 v2,旧 v1 移到 .bak
+
+签名:       阿良 (air, claude opus 4.7 1M context)
+            协作: 绣虎 (台机) + 缺哥 (指挥)
+============================================================
