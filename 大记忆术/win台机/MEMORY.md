@@ -28,7 +28,8 @@
 - [统一密码](reference_统一密码.md) — 5 台机 sudo / 登录共用一个密码,sudo -S 走 stdin 喂入,别写 argv
 - [Tailscale 网络](reference_Tailscale网络.md) — kenchoi315@gmail.com tailnet;台机/mini/neo2/neo 在线,air offline 3d
 - [Shadowrocket Tailscale bypass](reference_Shadowrocket_Tailscale_bypass.md) — 4 Mac 火箭必须放行 100.64.0.0/10,否则跨机 TCP 全挂(ICMP 通误导)
-- [跨机 SSH 走 100.x 直连别用 tailscale ssh wrapper](feedback_shadowrocket_skip_proxy.md) — 直接 ssh kenchoiXXX@100.x,wrapper 会反查 hostname 被 fake-DNS 拦成 198.18.x
+- ❗ [4 Mac Shadowrocket 必须三层放行 100.64.0.0/10](feedback_shadowrocket_skip_proxy.md) — docid=2 skip-proxy + docid=3 tun-excluded + Rule 段三层缺一切 SSID 必踩(2026-05-06 mini+neo 实证补漏);切 SSID 时 fake-DNS 还劫 controlplane,daemon 用 plist HTTPS_PROXY=127.0.0.1:1082 自救;别用 tailscale ssh wrapper 还是 100.x 直连
+- ❗ [Mac 出门连陌生网回家三查清单](feedback_Mac出门归来三查清单.md) — air/mac 切 SSID 回家先三查不要瞎重启:① plist HTTPS_PROXY 活 ② tailscale ping 是 direct ③ db 三层 100.64 在(2026-05-05 阿良无三查直接 reset 搞出 3 个影子 air 节点教训)
 - [按绣虎人设工作](feedback_按绣虎人设工作.md) — 谋/功/断/守四字心法:看远、事功、冷酷、对全局负责;反阿谀奉承、反流水账、反过度抛选择
 - [角色识别先校对再开口](feedback_角色识别先校对再开口.md) — 红线:任何角色名出现先查 reference 再答,只有东山是我分身,别人独立
 - [改代码同步 xlsx 结构](feedback_xlsx结构同步.md) — 加新 sheet/列依赖时配套改 xlsx 结构(不动数据),commit 前必跑一次
