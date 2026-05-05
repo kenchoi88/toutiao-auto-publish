@@ -51,6 +51,8 @@ RUN_REPORT_DIR = None
 LOG_FILE       = None
 FAIL_FILE      = None
 NOTICE_FILE    = None
+NOTICE_CHECKED_FILE = None  # [v1102] 持久化已检查账号集合(中断恢复后仍只读 1 次)
+LAST_PUBLISHED_FILE = None  # [v1102] 持久化最近 publish 成功账号(中断恢复后从此账号下一位起跑)
 ALERT_FILE     = None
 VIOLATION_FILE = None
 
@@ -67,7 +69,7 @@ os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 # ========== 运行报告目录 ==========
 
 def _init_run_dir():
-    global LOG_FILE, FAIL_FILE, NOTICE_FILE, ALERT_FILE, VIOLATION_FILE, RUN_REPORT_DIR
+    global LOG_FILE, FAIL_FILE, NOTICE_FILE, NOTICE_CHECKED_FILE, LAST_PUBLISHED_FILE, ALERT_FILE, VIOLATION_FILE, RUN_REPORT_DIR
     from datetime import datetime as _dt
     ts = _dt.now().strftime("%Y%m%d")
     RUN_REPORT_DIR = os.path.join(BASE_DIR, "运行报告", ts)
@@ -75,6 +77,8 @@ def _init_run_dir():
     LOG_FILE       = os.path.join(RUN_REPORT_DIR, "运行日志.txt")
     FAIL_FILE      = os.path.join(RUN_REPORT_DIR, "失败记录.xlsx")
     NOTICE_FILE    = os.path.join(RUN_REPORT_DIR, "系统通知.txt")
+    NOTICE_CHECKED_FILE = os.path.join(RUN_REPORT_DIR, "notice_checked.txt")  # [v1102] 已检查账号持久化
+    LAST_PUBLISHED_FILE = os.path.join(RUN_REPORT_DIR, "last_published.txt")  # [v1102] 最近 publish 成功账号持久化
     ALERT_FILE     = os.path.join(RUN_REPORT_DIR, "高阅读提醒.txt")
     VIOLATION_FILE = os.path.join(RUN_REPORT_DIR, "违规提醒.txt")
 
@@ -1085,15 +1089,18 @@ def get_url_from_ws(ws_url):
 
 def check_system_notice(ws_url, account_name):
     """
-    导航到消息中心 → 分别点击系统通知、审核通知频道
-    → 读取当天+昨天的消息原文，识别违规关键词
-    → 通知写入 NOTICE_FILE；违规写入 VIOLATION_FILE
-    → 返回 (notice_count, violation_count)
+    [v1102] 导航到消息中心 → 点击 系统通知 + 审核通知 频道
+    → 读取 2 天内(今天+昨天)的完整消息原文写入 NOTICE_FILE
+    新 selector: .conversation-box.notify-im-user-item (替代旧 span.name)
+    新提取: body.innerText 按日期行切分(MM-DD HH:MM / YYYY-MM-DD / 昨日/今日 HH:MM)
     """
     try:
         today = datetime.now()
-        today_full  = today.strftime("%Y-%m-%d")
-        today_short = today.strftime("%m-%d")
+        yesterday = today - timedelta(days=1)
+        today_short     = today.strftime("%m-%d")
+        yesterday_short = yesterday.strftime("%m-%d")
+        today_full      = today.strftime("%Y-%m-%d")
+        yesterday_full  = yesterday.strftime("%Y-%m-%d")
 
         wsc = ws_connect(ws_url, timeout=8)
         js(wsc, "location.href='https://mp.toutiao.com/profile_v4/personal/message?type=message_letter'", 300)
@@ -1101,17 +1108,19 @@ def check_system_notice(ws_url, account_name):
         time.sleep(3)
 
         wsc = ws_connect(ws_url, timeout=8)
+        time.sleep(2.5)
         notices = []
 
         for channel in ["系统通知", "审核通知"]:
             channel_json = channel.replace('"', '\\"')
             clicked = js(wsc, f"""
             (function(){{
-                var spans = document.querySelectorAll('span.name');
-                for(var i=0;i<spans.length;i++){{
-                    if(spans[i].textContent.trim() === "{channel_json}"){{
-                        var box = spans[i].closest('.conversation-box-primary') || spans[i].parentElement;
-                        if(box){{ box.click(); return 'ok'; }}
+                var items = document.querySelectorAll('.conversation-box.notify-im-user-item');
+                for(var i=0; i<items.length; i++){{
+                    var t = (items[i].innerText || '').trim();
+                    if(t.indexOf("{channel_json}") === 0){{
+                        items[i].click();
+                        return 'ok';
                     }}
                 }}
                 return null;
@@ -1125,27 +1134,52 @@ def check_system_notice(ws_url, account_name):
             time.sleep(2.5)
 
             result = js(wsc, f"""
-            (function(){{
-                var keys = ["{today_full}","{today_short}"];
-                var list = document.querySelector('.chat-container-list');
-                if(!list) return JSON.stringify([]);
-                var items = list.children;
+            (function() {{
+                var todayShort = "{today_short}";
+                var yesterdayShort = "{yesterday_short}";
+                var todayFull = "{today_full}";
+                var yesterdayFull = "{yesterday_full}";
+                var lines = (document.body.innerText || '').split(/\\r?\\n/);
                 var results = [];
-                var matched = false;
-                for(var i=0;i<items.length;i++){{
-                    var cls = items[i].className || '';
-                    if(cls.indexOf('time-stamp') !== -1){{
-                        var t = items[i].textContent.trim();
-                        matched = false;
-                        for(var k=0;k<keys.length;k++){{
-                            if(t.indexOf(keys[k]) !== -1){{ matched = true; break; }}
+                var current = '';
+                var currentDate = '';
+                var inWindow = false;
+                function dateInfo(line) {{
+                    var m = line.match(/^(\\d{{2}}-\\d{{2}})\\s+\\d{{2}}:\\d{{2}}$/);
+                    if (m) return m[1] === todayShort || m[1] === yesterdayShort;
+                    m = line.match(/^(\\d{{4}}-\\d{{2}}-\\d{{2}})\\s+\\d{{2}}:\\d{{2}}$/);
+                    if (m) return m[1] === todayFull || m[1] === yesterdayFull;
+                    if (/^昨日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    if (/^今日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    return null;
+                }}
+                function isDateLine(line) {{
+                    return /^(\\d{{2}}-\\d{{2}}|\\d{{4}}-\\d{{2}}-\\d{{2}}|昨日|今日)\\s+\\d{{2}}:\\d{{2}}$/.test(line);
+                }}
+                for (var i = 0; i < lines.length; i++) {{
+                    var line = lines[i].trim();
+                    if (!line) continue;
+                    if (isDateLine(line)) {{
+                        if (inWindow && current.trim()) {{
+                            results.push(currentDate + '\\n' + current.trim());
                         }}
-                    }} else if(matched && cls.indexOf('chat-row') !== -1){{
-                        var txt = items[i].textContent.trim();
-                        if(txt) results.push(txt);
+                        currentDate = line;
+                        current = '';
+                        inWindow = (dateInfo(line) === true);
+                    }} else if (inWindow) {{
+                        current += line + '\\n';
                     }}
                 }}
-                return JSON.stringify(results);
+                if (inWindow && current.trim()) {{
+                    results.push(currentDate + '\\n' + current.trim());
+                }}
+                var seen = {{}};
+                var dedup = [];
+                for (var k = 0; k < results.length; k++) {{
+                    var key = results[k].substring(0, 80);
+                    if (!seen[key]) {{ seen[key] = true; dedup.push(results[k]); }}
+                }}
+                return JSON.stringify(dedup);
             }})()
             """, 302)
 
@@ -1153,46 +1187,41 @@ def check_system_notice(ws_url, account_name):
                 try:
                     msgs = json.loads(result)
                     for msg in msgs:
-                        notices.append((channel, msg))
-                except Exception:
+                        notices.append(f"【{channel}】\n{msg}")
+                except:
                     pass
 
         wsc.close()
 
-        violations = []
-        for ch, msg in notices:
-            hit_cats = []
-            for cat, kws in VIOLATION_KEYWORDS.items():
-                for kw in kws:
-                    if kw in msg:
-                        hit_cats.append(cat)
-                        break
-            if hit_cats:
-                violations.append((ch, msg, hit_cats))
-
+        violation_count = 0
         if notices:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-            content_str = f"[{ts}] 账号 {account_name} 当天通知 {len(notices)} 条:\n"
-            for ch, msg in notices:
-                content_str += f"  【{ch}】{msg}\n"
-            content_str += "\n"
+            ts_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            violations = []
+            for n in notices:
+                for cat, kws in VIOLATION_KEYWORDS.items():
+                    for kw in kws:
+                        if kw in n:
+                            violations.append((cat, n))
+                            break
+            content_str = f"\n[{ts_str}] 账号 {account_name} 2 天内通知 ({len(notices)} 条):\n"
+            for n in notices:
+                content_str += f"\n--- 通知 ---\n{n}\n"
+            content_str += "\n" + "=" * 60 + "\n"
             with open(NOTICE_FILE, "a", encoding="utf-8") as f:
                 f.write(content_str)
-            log(f"  ⚠ 当天通知 {len(notices)} 条 → 已写入系统通知.txt")
+            log(f"  ⚠ 2 天内通知 {len(notices)} 条 → 系统通知.txt")
+            if violations:
+                vcontent = f"[{ts_str}] 账号 {account_name} 违规/扣分提醒:\n"
+                for cat, msg in violations:
+                    vcontent += f"  [{cat}] {msg[:300]}...\n"
+                vcontent += "\n"
+                with open(VIOLATION_FILE, "a", encoding="utf-8") as f:
+                    f.write(vcontent)
+                violation_count = len(violations)
+                log(f"  ⚠ 违规/扣分 {violation_count} 条 → 违规提醒.txt")
         else:
-            log("  系统/审核通知: 当天无新通知")
-
-        if violations:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-            vstr = f"[{ts}] 账号 {account_name} 命中违规 {len(violations)} 条:\n"
-            for ch, msg, cats in violations:
-                vstr += f"  【{ch}】[{','.join(cats)}] {msg}\n"
-            vstr += "\n"
-            with open(VIOLATION_FILE, "a", encoding="utf-8") as f:
-                f.write(vstr)
-            log(f"  ★★ 违规命中 {len(violations)} 条 → 已写入违规提醒.txt")
-
-        return len(notices), len(violations)
+            log("  系统/审核通知: 2 天内无新通知")
+        return len(notices), violation_count
     except Exception as e:
         log(f"  系统通知检测出错: {e}")
         return 0, 0
@@ -2317,7 +2346,19 @@ def run_death_grip(
     ok_count = fail_count = 0
     total_notices = total_violations = total_alerts = 0
     big_round = 0
-    notice_checked_set = set()  # [v1101.6] 每账号每天只读 1 次审核/系统通知
+    # [v1102] 每账号每天只读 1 次,持久化到 NOTICE_CHECKED_FILE,中断恢复后不重读
+    notice_checked_set = set()
+    if NOTICE_CHECKED_FILE and os.path.exists(NOTICE_CHECKED_FILE):
+        try:
+            with open(NOTICE_CHECKED_FILE, encoding='utf-8') as _ncf:
+                for _line in _ncf:
+                    _name = _line.strip().split('|')[0]
+                    if _name:
+                        notice_checked_set.add(_name)
+            if notice_checked_set:
+                log(f"  [v1102] 从 notice_checked.txt 恢复 {len(notice_checked_set)} 个已检查账号(中断恢复)")
+        except Exception as _e:
+            log(f"  [v1102] notice_checked.txt 读取失败: {_e}")
 
     def _do_publish(name, doc, round_label, is_retry=False):
         nonlocal ok_count, fail_count, total_notices, total_violations, total_alerts
@@ -2350,15 +2391,20 @@ def run_death_grip(
             close_current_tab(main_ws)
             return False, "失登"
 
-        # [v1101.6] 每账号每天只读 1 次审核/系统通知 — 后续发文跳过
+        # [v1102] 每账号每天只读 1 次审核/系统通知 — 持久化,中断恢复后仍跳过
         if name not in notice_checked_set:
             _nc, _vc = check_system_notice(ws_url, name)
             total_notices += _nc
             total_violations += _vc
             notice_checked_set.add(name)
+            try:
+                with open(NOTICE_CHECKED_FILE, "a", encoding="utf-8") as _ncf:
+                    _ncf.write(f"{name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            except Exception as _e:
+                log(f"  [v1102] 写 notice_checked.txt 失败: {_e}")
             time.sleep(2)
         else:
-            log(f"  系统/审核通知:{name} 本轮已读过,跳过")
+            log(f"  系统/审核通知:{name} 当天已读过,跳过")
 
         _d_wait = random.randint(8, 20)
         try:
@@ -2369,6 +2415,12 @@ def run_death_grip(
                     doc_pool.remove(doc)
                 acc_count[name] = acc_count.get(name, 0) + 1
                 ok_count += 1
+                # [v1102] 持久化最近 publish 成功账号 → 中断恢复时按此从下一位起跑
+                try:
+                    with open(LAST_PUBLISHED_FILE, "a", encoding="utf-8") as _lpf:
+                        _lpf.write(f"{name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                except Exception as _e:
+                    log(f"  [v1102] 写 last_published.txt 失败: {_e}")
                 _a = check_reading_stats(ws_url, name)
                 total_alerts += (_a or 0)
                 return True, ""
@@ -2628,8 +2680,39 @@ def main():
     whitelist_with_q = _read_whitelist_with_quota()
     if whitelist_with_q:
         wl_map = {n: q for n, q in whitelist_with_q}
-        accounts = [a for a in accounts if any(wn in a or a in wn for wn in wl_map)]
-        log(f"账号配置.xlsx[白名单]已加载，白名单 {len(wl_map)} 个，过滤后剩 {len(accounts)} 个账号")
+        # [v1102.1] 按白名单顺序重排 accounts(catchup 写白名单是环形重排,主循环必须用此顺序才能从断点开始)
+        _orig_accounts = list(accounts)
+        _new_accounts = []
+        _seen = set()
+        for wn, _wq in whitelist_with_q:
+            for a in _orig_accounts:
+                if a not in _seen and (wn in a or a in wn):
+                    _new_accounts.append(a)
+                    _seen.add(a)
+                    break
+        accounts = _new_accounts
+        # [v1102 主线主控 v2] 自动接续中断处:读 last_published.txt 拿最近 publish 账号 → 找 idx → 环形重排让下一位置首
+        # 版本说明 line 632「中断在第 X 轮第 Y 账号 → 重启从该轮该账号继续」
+        _last_published_acc = None
+        if LAST_PUBLISHED_FILE and os.path.exists(LAST_PUBLISHED_FILE):
+            try:
+                with open(LAST_PUBLISHED_FILE, encoding='utf-8') as _lpf:
+                    _lines = [_l.strip() for _l in _lpf if _l.strip()]
+                    if _lines:
+                        _last_published_acc = _lines[-1].split('|')[0].strip()
+            except Exception as _e:
+                log(f"  [v1102] last_published.txt 读取失败: {_e}")
+        if _last_published_acc and accounts:
+            _last_idx = -1
+            for _i, _a in enumerate(accounts):
+                if _last_published_acc in _a or _a in _last_published_acc:
+                    _last_idx = _i
+                    break
+            if _last_idx >= 0:
+                _next = (_last_idx + 1) % len(accounts)
+                accounts = accounts[_next:] + accounts[:_next]
+                log(f"  [v1102] 中断处自动接续:最近 publish「{_last_published_acc}」(idx={_last_idx}) → 从下一位「{accounts[0]}」起跑")
+        log(f"账号配置.xlsx[白名单]已加载，白名单 {len(wl_map)} 个，过滤+重排后剩 {len(accounts)} 个账号(首位={accounts[0] if accounts else '空'})")
         default_q = max(1, len(docs) // len(accounts)) if accounts else 1
         for a in accounts:
             matched_q = None

@@ -52,6 +52,8 @@ RUN_REPORT_DIR   = None
 LOG_FILE         = None
 FAIL_FILE        = None
 NOTICE_FILE      = None
+NOTICE_CHECKED_FILE = None  # [v1102] 持久化已检查账号集合(中断恢复后仍只读 1 次)
+LAST_PUBLISHED_FILE = None  # [v1102.2] 持久化最近 publish 成功账号(中断恢复后从此账号下一位起跑)
 ALERT_FILE       = None
 VIOLATION_FILE   = None
 
@@ -74,7 +76,7 @@ _SUMMARY_HEADERS = ["账号名", "轮次", "发文时间", "失败时间", "补�
 _HARD_TERMINATE_HEADERS = ["账号名", "终止原因", "终止时间", "本次已发篇数"]
 
 # 4 类硬终止 reason — 命中即永久放弃,不再尝试
-HARD_TERMINATE_REASONS = {"失登", "封号", "禁言", "侧边栏未找到"}
+HARD_TERMINATE_REASONS = {"封号", "禁言", "侧边栏未找到", "信用分过低"}  # [v1101.1] 失登 移除(改软重试),加 信用分过低
 
 def _ensure_config_excel():
     """如果账号配置.xlsx不存在则自动创建;已存在则确保关键 sheet 有表头"""
@@ -171,19 +173,53 @@ def _read_excel_sheet(sheet_name):
         return []
 
 def _append_sent_excel(name):
-    """往账号配置.xlsx的本轮已发sheet追加一行"""
+    """[v1102] 写「本轮已发」 sheet:行存在 count+1,不存在 append (账号, 1)"""
     try:
         _ensure_config_excel()
         wb = openpyxl.load_workbook(CONFIG_EXCEL)
         if "本轮已发" not in wb.sheetnames:
             ws_s = wb.create_sheet("本轮已发")
-            ws_s.append(["账号名"])
+            ws_s.append(["账号名", "已发次数"])
+            ws_s.append([name, 1])
         else:
             ws_s = wb["本轮已发"]
-        ws_s.append([name])
+            found_row = None
+            for row_idx, row in enumerate(ws_s.iter_rows(min_row=2, max_col=2, values_only=False), start=2):
+                if row[0].value and str(row[0].value).strip() == name:
+                    found_row = row_idx
+                    break
+            if found_row:
+                cur = ws_s.cell(row=found_row, column=2).value or 0
+                try: cur = int(cur)
+                except: cur = 0
+                ws_s.cell(row=found_row, column=2).value = cur + 1
+            else:
+                ws_s.append([name, 1])
         wb.save(CONFIG_EXCEL)
     except Exception:
         pass
+
+
+def _read_sent_with_count():
+    """[v1102] 读「本轮已发」 sheet → {账号: 已发次数}"""
+    if not os.path.exists(CONFIG_EXCEL): return {}
+    try:
+        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
+        if "本轮已发" not in wb.sheetnames: wb.close(); return {}
+        ws_r = wb["本轮已发"]
+        result = {}
+        for row in ws_r.iter_rows(min_row=2, max_col=2, values_only=True):
+            if not row or not row[0]: continue
+            name = str(row[0]).strip()
+            if not name or name.startswith('#'): continue
+            cnt = 1
+            if len(row) > 1 and row[1] is not None:
+                try: cnt = int(row[1])
+                except: cnt = 1
+            result[name] = cnt
+        wb.close(); return result
+    except Exception:
+        return {}
 
 def _append_fail_list(name, reason, doc_name, round_num):
     """失败列表追加一条（本轮内失败记录，供轮末补发）"""
@@ -338,13 +374,15 @@ def _sort_summary_by_account():
 
 
 def _init_run_dir():
-    global LOG_FILE, FAIL_FILE, NOTICE_FILE, ALERT_FILE, VIOLATION_FILE, RUN_REPORT_DIR
+    global LOG_FILE, FAIL_FILE, NOTICE_FILE, NOTICE_CHECKED_FILE, LAST_PUBLISHED_FILE, ALERT_FILE, VIOLATION_FILE, RUN_REPORT_DIR
     ts = datetime.now().strftime("%Y%m%d")
     RUN_REPORT_DIR = os.path.join(BASE_DIR, "运行报告", ts)
     os.makedirs(RUN_REPORT_DIR, exist_ok=True)
     LOG_FILE       = os.path.join(RUN_REPORT_DIR, "运行日志.txt")
     FAIL_FILE      = os.path.join(RUN_REPORT_DIR, "失败记录.xlsx")
     NOTICE_FILE    = os.path.join(RUN_REPORT_DIR, "系统通知.txt")
+    NOTICE_CHECKED_FILE = os.path.join(RUN_REPORT_DIR, "notice_checked.txt")  # [v1102] 已检查账号持久化
+    LAST_PUBLISHED_FILE = os.path.join(RUN_REPORT_DIR, "last_published.txt")  # [v1102.2] 最近 publish 成功账号持久化
     ALERT_FILE     = os.path.join(RUN_REPORT_DIR, "高阅读提醒.txt")
     VIOLATION_FILE = os.path.join(RUN_REPORT_DIR, "违规提醒.txt")
 
@@ -356,6 +394,10 @@ def log(msg):
     sys.stdout.buffer.flush()
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def write_status(*args, **kwargs):
+    pass
 
 
 def write_fail_excel(final_fails):
@@ -550,17 +592,12 @@ def scroll_find_account(main_ws, name):
                 for(var i=0;i<items.length;i++){{
                     var t = items[i].textContent.trim();
                     if(t === {name_json} || t.startsWith({name_json})){{
-                        // patch_lastacc: items[i] 是外层 account row (cliclick 不响应),
-                        // 真可点击 row 是其子树中的 horizontalAccount-* (x≈83 中心).
-                        // 修末位账号 cliclick (x≈108) 不响应,改点子 row 中心 (x≈83).
-                        var hor = items[i].querySelector('[class*="horizontalAccount"]');
-                        var row = (hor && hor.getBoundingClientRect().width>=60) ? hor : items[i];
-                        var r = row.getBoundingClientRect();
+                        var r = items[i].getBoundingClientRect();
                         if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
                             return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
-                        // 坐标不在视口内，再滚一次 (基于 row)
-                        row.scrollIntoView({{block:'center', behavior:'instant'}});
-                        r = row.getBoundingClientRect();
+                        // 坐标不在视口内，再滚一次
+                        items[i].scrollIntoView({{block:'center', behavior:'instant'}});
+                        r = items[i].getBoundingClientRect();
                         if(r.width > 0 && r.top >= 0 && r.top <= window.innerHeight)
                             return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
                     }}
@@ -604,17 +641,18 @@ def scroll_find_account(main_ws, name):
     """, 14)
     if not search_pos:
         return None
-    sp = json.loads(search_pos)
-    # 点搜索框，清空，用osascript真实键入账号名（CDP insertText不触发过滤）
-    click(main_ws, sp["x"], sp["y"], 15)
-    time.sleep(0.3)
-    subprocess.run(["osascript", "-e", f"""
-tell application "System Events"
-    keystroke "a" using {{command down}}
-    delay 0.2
-    keystroke {json.dumps(name)}
-end tell
-"""], capture_output=True)
+    # v1101.2: CDP nativeInputValueSetter 注入,绕过键盘+罐头前台依赖(实战 air 295→300)
+    js(main_ws, f"""
+    (function(){{
+        var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
+        if(!s) return 'no_input';
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(s, {name_json});
+        s.dispatchEvent(new Event('input',  {{bubbles:true}}));
+        s.dispatchEvent(new Event('change', {{bubbles:true}}));
+        return 'ok';
+    }})()
+    """, 15)
     time.sleep(1.5)
     # 再取坐标
     pos = js(main_ws, f"""
@@ -634,16 +672,17 @@ end tell
     """, 18)
     if pos:
         log(f"  搜索框过滤后找到账号: {name}")
-        # 清空搜索框，恢复完整列表
-        click(main_ws, sp["x"], sp["y"], 19)
-        time.sleep(0.2)
-        subprocess.run(["osascript", "-e", """
-tell application "System Events"
-    keystroke "a" using {command down}
-    delay 0.1
-    key code 51
-end tell
-"""], capture_output=True)
+        # v1101.2: CDP 清空搜索框,恢复完整列表
+        js(main_ws, """
+        (function(){
+            var s = document.querySelector('input[placeholder*="账号"],input[placeholder*="手机"]');
+            if(!s) return;
+            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(s, '');
+            s.dispatchEvent(new Event('input',  {bubbles:true}));
+            s.dispatchEvent(new Event('change', {bubbles:true}));
+        })()
+        """, 19)
         time.sleep(0.5)
         return json.loads(pos)
     return None
@@ -724,6 +763,108 @@ def find_account_webview(main_ws, name):
     return None
 
 
+def _search_box_set(main_ws, value):
+    """侧边栏搜索框设置值(空字符串=清空)。React-friendly: 用原型 setter 触发 input/change 事件。"""
+    val_json = json.dumps(value)
+    return js(main_ws, f"""
+    (function(){{
+        var inputs = document.querySelectorAll('input');
+        for(var i=0;i<inputs.length;i++){{
+            var ph = inputs[i].getAttribute('placeholder') || '';
+            if(ph.indexOf('账号') !== -1 || ph.indexOf('手机号') !== -1){{
+                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(inputs[i], '');
+                inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
+                if({val_json}.length > 0){{
+                    setter.call(inputs[i], {val_json});
+                    inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
+                    inputs[i].dispatchEvent(new Event('change', {{bubbles:true}}));
+                }}
+                return 'ok';
+            }}
+        }}
+        return 'no_input';
+    }})()
+    """, 50)
+
+
+def _locate_filtered_account(main_ws, name):
+    """搜索框过滤后,直接抓第一个匹配账号的中心坐标(viewport 相对)。"""
+    name_json = json.dumps(name)
+    pos = js(main_ws, f"""
+    (function(){{
+        var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+        for(var i=0;i<items.length;i++){{
+            var t = items[i].textContent.trim();
+            if(t === {name_json} || t.startsWith({name_json})){{
+                items[i].scrollIntoView({{block:'center', behavior:'instant'}});
+                var r = items[i].getBoundingClientRect();
+                if(r.width > 0)
+                    return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
+            }}
+        }}
+        return null;
+    }})()
+    """, 51)
+    if not pos:
+        return None
+    return json.loads(pos)
+
+
+def find_or_reopen_webview(main_ws, name, reopen_attempts=2):
+    """虚拟滚动底部账号 webview partition 不渲染时,通过侧边栏搜索框定位账号让 webview 重建。
+
+    流程:正常 find_account_webview 失败 → 关 tab → 搜索框输入账号名 → 等过滤 →
+    抓过滤后的账号坐标 → click → 等更长时间 → 再尝试 find_account_webview。
+    搜索框过滤后只剩匹配项渲染在 DOM 顶部,不再受虚拟滚动影响。
+    """
+    ws_url = find_account_webview(main_ws, name)
+    if ws_url:
+        return ws_url
+
+    for attempt in range(reopen_attempts):
+        log(f"  webview partition 失败,搜索框重建 {attempt+1}/{reopen_attempts}: 输入 \"{name}\"")
+        try:
+            close_current_tab(main_ws)
+        except Exception as e:
+            log(f"  关 tab 异常(忽略): {e}")
+        time.sleep(1.0)
+
+        # 用搜索框过滤
+        rs = _search_box_set(main_ws, name)
+        if rs != 'ok':
+            log("  搜索框定位失败,降级用 scroll_find_account")
+            pos = scroll_find_account(main_ws, name)
+        else:
+            time.sleep(1.5)  # 等过滤结果 React 渲染完
+            pos = _locate_filtered_account(main_ws, name)
+            if not pos:
+                log("  搜索过滤后仍找不到,降级用 scroll_find_account")
+                _search_box_set(main_ws, "")  # 清空恢复列表
+                time.sleep(0.5)
+                pos = scroll_find_account(main_ws, name)
+
+        if not pos:
+            log(f"  搜索/滚动都找不到 {name},重建中止")
+            _search_box_set(main_ws, "")
+            return None
+
+        click(main_ws, pos["x"], pos["y"], 20)
+        time.sleep(WAIT_LOAD + 2)  # 比首次多等 2 秒,给虚拟滚动 lazy render 留余地
+
+        ws_url = find_account_webview(main_ws, name)
+
+        # 不论成败,清空搜索框还原列表(避免影响后续账号)
+        _search_box_set(main_ws, "")
+        time.sleep(0.3)
+
+        if ws_url:
+            log(f"  webview 重建成功(尝试 {attempt+1})")
+            return ws_url
+
+    return None
+
+
 def get_url_from_ws(ws_url):
     try:
         wsc = ws_connect(ws_url, timeout=4)
@@ -735,13 +876,19 @@ def get_url_from_ws(ws_url):
 
 
 def check_system_notice(ws_url, account_name):
+    """
+    [v1102] 导航到消息中心 → 点击 系统通知 + 审核通知 频道
+    → 读取 2 天内(今天+昨天)的完整消息原文写入 NOTICE_FILE
+    新 selector: .conversation-box.notify-im-user-item (替代旧 span.name)
+    新提取: body.innerText 按日期行切分(MM-DD HH:MM / YYYY-MM-DD / 昨日/今日 HH:MM)
+    """
     try:
         today = datetime.now()
-        today_full = today.strftime("%Y-%m-%d")
-        today_short = today.strftime("%m-%d")
         yesterday = today - timedelta(days=1)
-        yesterday_full = yesterday.strftime("%Y-%m-%d")
+        today_short     = today.strftime("%m-%d")
         yesterday_short = yesterday.strftime("%m-%d")
+        today_full      = today.strftime("%Y-%m-%d")
+        yesterday_full  = yesterday.strftime("%Y-%m-%d")
 
         wsc = ws_connect(ws_url, timeout=8)
         js(wsc, "location.href='https://mp.toutiao.com/profile_v4/personal/message?type=message_letter'", 300)
@@ -749,16 +896,19 @@ def check_system_notice(ws_url, account_name):
         time.sleep(3)
 
         wsc = ws_connect(ws_url, timeout=8)
+        time.sleep(2.5)
         notices = []
 
         for channel in ["系统通知", "审核通知"]:
+            channel_json = channel.replace('"', '\\"')
             clicked = js(wsc, f"""
             (function(){{
-                var spans = document.querySelectorAll('span.name');
-                for(var i=0;i<spans.length;i++){{
-                    if(spans[i].textContent.trim() === "{channel}"){{
-                        var box = spans[i].closest('.conversation-box-primary') || spans[i].parentElement;
-                        if(box){{ box.click(); return 'ok'; }}
+                var items = document.querySelectorAll('.conversation-box.notify-im-user-item');
+                for(var i=0; i<items.length; i++){{
+                    var t = (items[i].innerText || '').trim();
+                    if(t.indexOf("{channel_json}") === 0){{
+                        items[i].click();
+                        return 'ok';
                     }}
                 }}
                 return null;
@@ -769,38 +919,63 @@ def check_system_notice(ws_url, account_name):
                 log(f"  未找到频道: {channel}")
                 continue
 
-            time.sleep(1.5)
+            time.sleep(2.5)
 
             result = js(wsc, f"""
-            (function(){{
-                var todayFull = "{today_full}";
+            (function() {{
                 var todayShort = "{today_short}";
-                var yesterdayFull = "{yesterday_full}";
                 var yesterdayShort = "{yesterday_short}";
-                var list = document.querySelector('.chat-container-list');
-                if(!list) return JSON.stringify([]);
-                var items = list.children;
+                var todayFull = "{today_full}";
+                var yesterdayFull = "{yesterday_full}";
+                var lines = (document.body.innerText || '').split(/\\r?\\n/);
                 var results = [];
-                var isToday = false;
-                for(var i=0;i<items.length;i++){{
-                    var cls = items[i].className || '';
-                    if(cls.indexOf('time-stamp') !== -1){{
-                        var t = items[i].textContent.trim();
-                        isToday = t.startsWith(todayFull) || t.startsWith(todayShort) || t.startsWith(yesterdayFull) || t.startsWith(yesterdayShort);
-                    }} else if(isToday && cls.indexOf('chat-row') !== -1){{
-                        var txt = items[i].textContent.trim();
-                        if(txt) results.push(txt.substring(0, 300));
-                        isToday = false;
+                var current = '';
+                var currentDate = '';
+                var inWindow = false;
+                function dateInfo(line) {{
+                    var m = line.match(/^(\\d{{2}}-\\d{{2}})\\s+\\d{{2}}:\\d{{2}}$/);
+                    if (m) return m[1] === todayShort || m[1] === yesterdayShort;
+                    m = line.match(/^(\\d{{4}}-\\d{{2}}-\\d{{2}})\\s+\\d{{2}}:\\d{{2}}$/);
+                    if (m) return m[1] === todayFull || m[1] === yesterdayFull;
+                    if (/^昨日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    if (/^今日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    return null;
+                }}
+                function isDateLine(line) {{
+                    return /^(\\d{{2}}-\\d{{2}}|\\d{{4}}-\\d{{2}}-\\d{{2}}|昨日|今日)\\s+\\d{{2}}:\\d{{2}}$/.test(line);
+                }}
+                for (var i = 0; i < lines.length; i++) {{
+                    var line = lines[i].trim();
+                    if (!line) continue;
+                    if (isDateLine(line)) {{
+                        if (inWindow && current.trim()) {{
+                            results.push(currentDate + '\\n' + current.trim());
+                        }}
+                        currentDate = line;
+                        current = '';
+                        inWindow = (dateInfo(line) === true);
+                    }} else if (inWindow) {{
+                        current += line + '\\n';
                     }}
                 }}
-                return JSON.stringify(results);
+                if (inWindow && current.trim()) {{
+                    results.push(currentDate + '\\n' + current.trim());
+                }}
+                // 去重(预览和详情可能重复)
+                var seen = {{}};
+                var dedup = [];
+                for (var k = 0; k < results.length; k++) {{
+                    var key = results[k].substring(0, 80);
+                    if (!seen[key]) {{ seen[key] = true; dedup.push(results[k]); }}
+                }}
+                return JSON.stringify(dedup);
             }})()
             """, 302)
 
             if result:
                 try:
                     for msg in json.loads(result):
-                        notices.append(f"【{channel}】{msg}")
+                        notices.append(f"【{channel}】\n{msg}")
                 except:
                     pass
 
@@ -808,7 +983,7 @@ def check_system_notice(ws_url, account_name):
 
         violation_count = 0
         if notices:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            ts_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             # 分析违规类通知
             violations = []
             for n in notices:
@@ -817,26 +992,26 @@ def check_system_notice(ws_url, account_name):
                         if kw in n:
                             violations.append((cat, n))
                             break
-            # 写系统通知
-            content = f"[{ts}] 账号 {account_name} 当天通知:\n"
+            # 写系统通知 — 完整内容,不截断
+            content = f"\n[{ts_str}] 账号 {account_name} 2 天内通知 ({len(notices)} 条):\n"
             for n in notices:
-                content += f"  {n}\n"
-            content += "\n"
+                content += f"\n--- 通知 ---\n{n}\n"
+            content += "\n" + "=" * 60 + "\n"
             with open(NOTICE_FILE, "a", encoding="utf-8") as f:
                 f.write(content)
-            log(f"  ⚠ 当天通知 {len(notices)} 条")
+            log(f"  ⚠ 2 天内通知 {len(notices)} 条 → 系统通知.txt")
             # 写违规提醒
             if violations:
-                vcontent = f"[{ts}] 账号 {account_name} 违规/扣分提醒:\n"
+                vcontent = f"[{ts_str}] 账号 {account_name} 违规/扣分提醒:\n"
                 for cat, msg in violations:
-                    vcontent += f"  [{cat}] {msg}\n"
+                    vcontent += f"  [{cat}] {msg[:300]}...\n"
                 vcontent += "\n"
                 with open(VIOLATION_FILE, "a", encoding="utf-8") as f:
                     f.write(vcontent)
                 violation_count = len(violations)
                 log(f"  ⚠ 违规/扣分 {violation_count} 条 → 违规提醒.txt")
         else:
-            log("  系统/审核通知: 近三天无新通知")
+            log("  系统/审核通知: 2 天内无新通知")
         return len(notices), violation_count
     except Exception as e:
         log(f"  系统通知检测出错: {e}")
@@ -1139,11 +1314,24 @@ def publish_article(ws_url, doc_path, main_ws, account_name="", _credit_out=None
 
     p = json.loads(v)
 
-    # 激活窗口，激活后重新取坐标
+    # [v1101 P5] 激活强化:unhide + AXRaise + verify frontmost + 重试 3 次
     subprocess.run(["osascript", "-e", """
+tell application "创作罐头" to activate
+delay 0.2
 tell application "System Events"
     tell process "创作罐头"
+        try
+            if visible is false then set visible to true
+        end try
         set frontmost to true
+        try
+            perform action "AXRaise" of window 1
+        end try
+        repeat 3 times
+            if frontmost then exit repeat
+            set frontmost to true
+            delay 0.3
+        end repeat
     end tell
 end tell
 """], capture_output=True)
@@ -1174,32 +1362,89 @@ end tell
     title_y = wv0['sy'] + 50
     subprocess.run(["cliclick", f"c:{title_x},{title_y}"], capture_output=True)
     time.sleep(0.5)
-    log(f"  cliclick 点击文档导入 ({import_x},{import_y})")
-    subprocess.run(["cliclick", f"c:{import_x},{import_y}"], capture_output=True)
-    time.sleep(1.5)
-
-    # 等"选择文档"弹窗出现（最多等3分钟，网络慢时导入按钮需要较长时间响应）
+    # [v1101 P7] cliclick 文档导入 + 等弹窗,失败重试 3 次
     sel = None
-    for _ in range(360):
-        sel = js(wsc, """
-        (function(){
-            var btns = document.querySelectorAll('button');
-            for(var i=0;i<btns.length;i++){
-                if(btns[i].textContent.trim() === '\u9009\u62e9\u6587\u6863'){
-                    var r = btns[i].getBoundingClientRect();
-                    if(r.width > 0) return JSON.stringify({bx: Math.round(r.left+r.width/2), by: Math.round(r.top+r.height/2)});
+    for click_attempt in range(3):
+        attempt_str = f" [第{click_attempt+1}次]" if click_attempt > 0 else ""
+        log(f"  cliclick 点击文档导入 ({import_x},{import_y}){attempt_str}")
+        subprocess.run(["cliclick", f"c:{import_x},{import_y}"], capture_output=True)
+        time.sleep(1.5)
+
+        for i in range(20):
+            sel = js(wsc, """
+            (function(){
+                var btns = document.querySelectorAll('button');
+                for(var i=0;i<btns.length;i++){
+                    if(btns[i].textContent.trim() === '选择文档'){
+                        var r = btns[i].getBoundingClientRect();
+                        if(r.width > 0) return JSON.stringify({bx: Math.round(r.left+r.width/2), by: Math.round(r.top+r.height/2)});
+                    }
                 }
-            }
-            return null;
-        })()
-        """, 65)
+                return null;
+            })()
+            """, 65)
+            if sel:
+                break
+            if i == 4 and click_attempt == 0:
+                all_btns = js(wsc, """
+                (function(){
+                    var btns = document.querySelectorAll('button');
+                    var names = [];
+                    for(var i=0;i<btns.length;i++){
+                        var r = btns[i].getBoundingClientRect();
+                        if(r.width > 0) names.push(btns[i].textContent.trim());
+                    }
+                    return JSON.stringify(names);
+                })()
+                """, 67)
+                log(f"  当前按钮: {all_btns}")
+            time.sleep(0.5)
+
         if sel:
+            if click_attempt > 0:
+                log(f"  cliclick 第{click_attempt+1}次成功唤出弹窗")
             break
-        time.sleep(0.5)
+
+        if click_attempt < 2:
+            log(f"  弹窗未出,重 activate + 重读坐标后重试")
+            subprocess.run(["osascript", "-e", """
+tell application "创作罐头" to activate
+delay 0.2
+tell application "System Events"
+    tell process "创作罐头"
+        try
+            if visible is false then set visible to true
+        end try
+        set frontmost to true
+        try
+            perform action "AXRaise" of window 1
+        end try
+    end tell
+end tell
+"""], capture_output=True)
+            time.sleep(0.6)
+            wv_s3 = js(main_ws, """
+            (function(){
+                var wvs = document.querySelectorAll('webview');
+                var maxArea = 0, best = null;
+                for(var i=0;i<wvs.length;i++){
+                    var r = wvs[i].getBoundingClientRect();
+                    var area = r.width * r.height;
+                    if(area > maxArea){ maxArea = area; best = r; }
+                }
+                if(!best) return null;
+                return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
+            })()
+            """, 62)
+            if wv_s3:
+                wv0c = json.loads(wv_s3)
+                import_x = wv0c['sx'] + p['x']
+                import_y = wv0c['sy'] + p['y']
+                log(f"  重试前坐标更新: ({import_x},{import_y})")
 
     if not sel:
         wsc.close()
-        return False, "文档导入弹窗未出现"
+        return False, "文档导入弹窗未出现(3 次 cliclick 重试均失败)"
 
     sb = json.loads(sel)
     screen_x = wv0['sx'] + sb['bx']
@@ -1360,12 +1605,7 @@ end tell
             result_holder[0] = False
             return
 
-        # Step 3: 等主对话框自动关闭（完整文件路径 NSOpenPanel 会直接打开）
-        for _ in range(12):
-            time.sleep(0.5)
-            if not sheet_exists():
-                result_holder[0] = True
-                return
+        # [v1101 P1] Step 3 跳过:macOS 26 NSOpenPanel 不再自动关,Step 4 必打,6s 硬等纯发呆
 
         # Step 4: 主框没关 → cliclick 物理点"打开"按钮
         log("  主对话框未自动关闭 → cliclick 点打开按钮")
@@ -1412,9 +1652,14 @@ end tell
     for _ in range(15):
         v = js(wsc, """
         (function(){
-            var el = document.querySelector('.ProseMirror');
-            if(!el) return 0;
-            return el.textContent.trim().length;
+            // [v1101 P3] 取最长 ProseMirror(避免命中标题 placeholder 5 字)
+            var els = document.querySelectorAll('.ProseMirror');
+            var max = 0;
+            for (var i = 0; i < els.length; i++) {
+                var l = els[i].textContent.trim().length;
+                if (l > max) max = l;
+            }
+            return max;
         })()
         """, 75)
         char_count = int(v) if v else 0
@@ -1423,9 +1668,37 @@ end tell
         time.sleep(0.8)
 
     log(f"  文章字数: {char_count}")
+    # [v1101 P2] 字数<50 重试 fill_dialog 一次
     if char_count < 50:
-        wsc.close()
-        return False, "文档导入后内容为空"
+        log(f"  对话框已关但字数仅 {char_count}（文档未真导入），重试 fill_dialog")
+        result_holder[0] = None
+        t = threading.Thread(target=fill_dialog, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        subprocess.run(["cliclick", f"c:{screen_x},{screen_y}"], capture_output=True)
+        t.join(timeout=30)
+        time.sleep(5)
+        char_count = 0
+        for _ in range(15):
+            v = js(wsc, """
+            (function(){
+                var els = document.querySelectorAll('.ProseMirror');
+                var max = 0;
+                for (var i = 0; i < els.length; i++) {
+                    var l = els[i].textContent.trim().length;
+                    if (l > max) max = l;
+                }
+                return max;
+            })()
+            """, 75)
+            char_count = int(v) if v else 0
+            if char_count >= 50:
+                break
+            time.sleep(0.8)
+        log(f"  重试后字数: {char_count}")
+        if char_count < 50:
+            wsc.close()
+            return False, "文档导入后内容为空(重试1次仍空)"
 
     # 滚动到页面最底部，等待图片全部加载
     js(wsc, """
@@ -1473,67 +1746,126 @@ end tell
     log(f"  信用分: {credit_score if credit_score is not None else '未读取到'}")
     if _credit_out is not None:
         _credit_out.append(credit_score)
+    # [v1101.1] 信用分 < 60 → 硬终止,跟禁言/封号同等放弃
+    if credit_score is not None and credit_score < 60:
+        log(f"  ★ 信用分 {credit_score} < 60,硬终止")
+        wsc.close()
+        return False, "信用分过低"
     should_first = (account_name not in NOFIRST_ACCOUNTS) and (credit_score is not None and credit_score >= 95)
 
-    # 根据信用分设置头条首发复选框
-    first_result = js(wsc, f"""
-    (function(){{
-        var shouldCheck = {'true' if should_first else 'false'};
+    # [v1101.3] 头条首发复选框: 探测 + cliclick 点击 + 回读校验 + 三轮兜底 + 硬保护
+    _PROBE_JS = r"""
+    (function(){
         var all = document.querySelectorAll('*');
-        for(var i=0;i<all.length;i++){{
-            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '\u5934\u6761\u9996\u53d1'){{
-                // 向上找 LABEL.byte-checkbox，用 byte-checkbox-checked 判断勾选状态
+        for(var i=0;i<all.length;i++){
+            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '头条首发'){
                 var p = all[i].parentElement;
-                while(p && p.tagName !== 'BODY'){{
-                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){{
+                while(p && p.tagName !== 'BODY'){
+                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){
                         var isChecked = p.classList.contains('byte-checkbox-checked');
-                        if(isChecked === shouldCheck){{
-                            return JSON.stringify({{already: true, checked: isChecked}});
-                        }}
                         var r = p.getBoundingClientRect();
-                        if(r.width > 0 && r.height > 0){{
-                            return JSON.stringify({{x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}});
-                        }}
-                        break;
-                    }}
+                        var px = Math.round(r.left + r.width/2);
+                        var py = Math.round(r.top + r.height/2);
+                        return JSON.stringify({found:true, checked:isChecked, cb_x:px, cb_y:py});
+                    }
                     p = p.parentElement;
-                }}
-            }}
-        }}
-        return null;
-    }})()
-    """, 79)
-    if first_result:
-        fr = json.loads(first_result)
-        if "already" in fr:
-            log(f"  头条首发: 已是{'勾选' if fr['checked'] else '未勾选'}，无需操作")
-        elif "x" in fr:
-            # cliclick真实点击（CDP虚拟事件对自定义复选框无效）
-            wv_r = js(main_ws, """
-            (function(){
-                var wvs = document.querySelectorAll('webview');
-                var maxArea = 0, best = null;
-                for(var i=0;i<wvs.length;i++){
-                    var r = wvs[i].getBoundingClientRect();
-                    var area = r.width * r.height;
-                    if(area > maxArea){ maxArea = area; best = r; }
                 }
-                if(!best) return null;
-                return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
-            })()
-            """, 80)
-            wv = json.loads(wv_r) if wv_r else None
-            if wv:
-                sx = wv['sx'] + fr['x']
-                sy = wv['sy'] + fr['y']
-                subprocess.run(["cliclick", f"c:{sx},{sy}"], capture_output=True)
-                log(f"  头条首发 cliclick ({sx},{sy})")
-            else:
-                log("  头条首发: webview坐标获取失败，跳过点击")
-            time.sleep(0.3)
-            log(f"  头条首发: {'勾选' if should_first else '取消勾选'}")
-    else:
+            }
+        }
+        return null;
+    })()
+    """
+    _CLICK_JS = r"""
+    (function(){
+        var all = document.querySelectorAll('*');
+        for(var i=0;i<all.length;i++){
+            if(all[i].childElementCount === 0 && all[i].textContent.trim() === '头条首发'){
+                var p = all[i].parentElement;
+                while(p && p.tagName !== 'BODY'){
+                    if(p.tagName === 'LABEL' && p.classList.contains('byte-checkbox')){
+                        try{ p.click(); }catch(e){}
+                        var inp = p.querySelector('input[type="checkbox"]');
+                        if(inp){
+                            try{ inp.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+                        }
+                        return 'label';
+                    }
+                    p = p.parentElement;
+                }
+            }
+        }
+        return null;
+    })()
+    """
+    _WV_JS = r"""
+    (function(){
+        var wvs = document.querySelectorAll('webview');
+        var maxArea = 0, best = null;
+        for(var i=0;i<wvs.length;i++){
+            var r = wvs[i].getBoundingClientRect();
+            var area = r.width * r.height;
+            if(area > maxArea){ maxArea = area; best = r; }
+        }
+        if(!best) return null;
+        return JSON.stringify({sx: Math.round(window.screenX + best.left), sy: Math.round(window.screenY + best.top)});
+    })()
+    """
+
+    def _probe_first():
+        raw = js(wsc, _PROBE_JS, 79)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def _wv_origin():
+        raw = js(main_ws, _WV_JS, 80)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    fr = _probe_first()
+    if fr is None:
         log("  头条首发: 未找到复选框")
+    elif bool(fr.get('checked')) == should_first:
+        log(f"  头条首发: 已是{'勾选' if fr['checked'] else '未勾选'}，无需操作")
+    else:
+        attempts = []
+        verified = False
+        for attempt in range(1, 4):
+            if attempt < 3 and fr.get('found'):
+                wv = _wv_origin()
+                if wv:
+                    sx = wv['sx'] + fr['cb_x']
+                    sy = wv['sy'] + fr['cb_y']
+                    subprocess.run(["cliclick", f"c:{sx},{sy}"], capture_output=True)
+                    attempts.append(f"cliclick#{attempt}@({sx},{sy})")
+                    time.sleep(0.4)
+                else:
+                    attempts.append(f"cliclick#{attempt}=no_wv")
+                    time.sleep(0.2)
+            else:
+                rc = js(wsc, _CLICK_JS, 30)
+                time.sleep(0.4)
+                attempts.append(f"js#{attempt}={rc}")
+            fr2 = _probe_first()
+            if fr2 and bool(fr2.get('checked')) == should_first:
+                log(f"  头条首发: {'勾选' if should_first else '取消勾选'} 已校验 [{'/'.join(attempts)}]")
+                verified = True
+                break
+            fr = fr2 if fr2 else fr
+        if not verified:
+            actual = fr.get('checked') if fr else None
+            log(f"  ✗ 头条首发校准失败: 目标={should_first} 实际={actual} 尝试=[{'/'.join(attempts)}]")
+            if (not should_first) and actual is True:
+                log(f"  ★ 硬保护: 应取消首发但仍勾选,跳过该篇避免扣 5 分")
+                wsc.close()
+                return False, "首发取消失败(硬保护)"
 
     # 点"预览并发布" + 等"确认发布"，最多重试5次（封面图加载慢时第一次点可能无效）
     confirm_clicked = False
@@ -1615,6 +1947,36 @@ end tell
         if confirm_clicked:
             break
         if attempt < 4:
+            # [v1101 P4] 抓 DOM 写诊断
+            try:
+                diag = js(wsc, """
+                (function(){
+                    var out = [];
+                    var btns = document.querySelectorAll('button');
+                    out.push('btn-tags='+btns.length);
+                    for(var i=0;i<btns.length;i++){
+                        var r = btns[i].getBoundingClientRect();
+                        if(r.width>0 && r.height>0){
+                            out.push('btn['+i+']="'+btns[i].textContent.trim().slice(0,30)+'" disabled='+btns[i].disabled);
+                        }
+                    }
+                    out.push('---含发布字非button可见叶子---');
+                    var all = document.querySelectorAll('*');
+                    for(var i=0;i<all.length;i++){
+                        if(all[i].tagName==='BUTTON') continue;
+                        if(all[i].childElementCount!==0) continue;
+                        var t = all[i].textContent.trim();
+                        if(t.length<25 && t.indexOf('发布')!==-1){
+                            var r = all[i].getBoundingClientRect();
+                            if(r.width>0) out.push(all[i].tagName+'="'+t+'"');
+                        }
+                    }
+                    return out.join(' | ');
+                })()
+                """, 84)
+                log(f"  [DIAG] {diag}")
+            except Exception as e:
+                log(f"  [DIAG] dump失败: {e}")
             log(f"  确认发布未出现，封面图可能未加载完，准备第{attempt+2}次点击预览并发布...")
 
     if not confirm_clicked:
@@ -1666,6 +2028,31 @@ def get_docs():
     return sorted([d for d in docs if "已发送" not in d])
 
 
+# [v1101.4] doc_pool 实时校验 + 重扫工具,救"分发完源必删"导致罐头找不到文件
+def _pick_doc(doc_pool):
+    """从 doc_pool 抽一篇实存的 docx,失效引用就地清理。返回 None 表示池已空。"""
+    while doc_pool:
+        doc = random.choice(doc_pool)
+        if os.path.exists(doc):
+            return doc
+        log(f"  ! 源已删除(可能被外部分发),从池剔除: {os.path.basename(doc)}")
+        doc_pool.remove(doc)
+    return None
+
+
+def _resync_pool(doc_pool):
+    """大循环开始前重扫素材池:剔除幽灵引用 + 加入新到的素材。返回 (剔除数, 新增数)。"""
+    cur = set(get_docs())
+    before = len(doc_pool)
+    doc_pool[:] = [d for d in doc_pool if d in cur]
+    removed = before - len(doc_pool)
+    pool_set = set(doc_pool)
+    new_docs = [d for d in cur if d not in pool_set]
+    if new_docs:
+        doc_pool.extend(new_docs)
+    return removed, len(new_docs)
+
+
 def move_to_sent(doc_path):
     os.makedirs(SENT_FOLDER, exist_ok=True)
     dest = os.path.join(SENT_FOLDER, os.path.basename(doc_path))
@@ -1710,6 +2097,19 @@ def run_death_grip(
     ok_count = fail_count = 0
     total_notices = total_violations = total_alerts = 0
     big_round = 0
+    # [v1102] 每账号每天只读 1 次,持久化到 NOTICE_CHECKED_FILE,中断恢复后不重读
+    notice_checked_set = set()
+    if NOTICE_CHECKED_FILE and os.path.exists(NOTICE_CHECKED_FILE):
+        try:
+            with open(NOTICE_CHECKED_FILE, encoding='utf-8') as _ncf:
+                for _line in _ncf:
+                    _name = _line.strip().split('|')[0]
+                    if _name:
+                        notice_checked_set.add(_name)
+            if notice_checked_set:
+                log(f"  [v1102] 从 notice_checked.txt 恢复 {len(notice_checked_set)} 个已检查账号(中断恢复)")
+        except Exception as _e:
+            log(f"  [v1102] notice_checked.txt 读取失败: {_e}")
 
     def _do_publish(name, doc, round_label, is_retry=False):
         nonlocal ok_count, fail_count, total_notices, total_violations, total_alerts
@@ -1726,7 +2126,7 @@ def run_death_grip(
         click(main_ws, pos["x"], pos["y"], 20)
         time.sleep(WAIT_LOAD)
 
-        ws_url = find_account_webview(main_ws, name)
+        ws_url = find_or_reopen_webview(main_ws, name)
         if not ws_url:
             log("  X 找不到 webview")
             fail_records.append((datetime.now().strftime("%Y-%m-%d %H:%M"), name, "webview匹配失败"))
@@ -1742,10 +2142,21 @@ def run_death_grip(
             close_current_tab(main_ws)
             return False, "失登"
 
-        nc, vc = check_system_notice(ws_url, name)
-        total_notices += nc
-        total_violations += vc
-        time.sleep(2)
+        # [v1102] 每账号每天只读 1 次审核/系统通知 — 持久化,中断恢复后仍跳过
+        if name not in notice_checked_set:
+            nc, vc = check_system_notice(ws_url, name)
+            total_notices += nc
+            total_violations += vc
+            notice_checked_set.add(name)
+            # 同步写持久化文件,防中断后重读
+            try:
+                with open(NOTICE_CHECKED_FILE, "a", encoding="utf-8") as _ncf:
+                    _ncf.write(f"{name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            except Exception as _e:
+                log(f"  [v1102] 写 notice_checked.txt 失败: {_e}")
+            time.sleep(2)
+        else:
+            log(f"  系统/审核通知:{name} 当天已读过,跳过")
 
         _d_wait = random.randint(8, 20)
         try:
@@ -1760,6 +2171,12 @@ def run_death_grip(
                 acc_count[name] = acc_count.get(name, 0) + 1
                 success_accounts.add(name)
                 ok_count += 1
+                # [v1102.2] 持久化最近 publish 成功账号
+                try:
+                    with open(LAST_PUBLISHED_FILE, "a", encoding="utf-8") as _lpf:
+                        _lpf.write(f"{name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                except Exception as _e:
+                    log(f"  [v1102.2] 写 last_published.txt 失败: {_e}")
                 total_alerts += check_reading_stats(ws_url, name)
                 return True, ""
             else:
@@ -1813,6 +2230,14 @@ def run_death_grip(
             log(f"\n{log_label}所有账号都已满 quota,死磕结束")
             break
 
+        # [v1101.4] 大循环开头重扫池, 实时同步外部 mutate (scp+rm 等)
+        _removed, _added = _resync_pool(doc_pool)
+        if _removed or _added:
+            log(f"  [v1101.4] doc_pool 重扫: 剔除 {_removed} 条幽灵引用, 新增 {_added} 篇素材")
+        if not doc_pool:
+            log(f"\n{log_label}重扫后文档池已空,死磕结束")
+            break
+
         big_round += 1
         log(f"\n{'='*20} {log_label}第 {big_round} 大循环 开始 (active {len(active)} 账号,文档池 {len(doc_pool)} 篇) {'='*20}")
 
@@ -1828,7 +2253,11 @@ def run_death_grip(
                     break
                 if not _is_eligible(name, sub_skipped):
                     continue
-                doc = random.choice(doc_pool)
+                # [v1101.4] _pick_doc 替代 random.choice: 校验存在 + 失效就地剔除
+                doc = _pick_doc(doc_pool)
+                if doc is None:
+                    log(f"  Phase A 中文档池被 _pick_doc 清空(全失效),提前结束")
+                    break
                 round_label = f"[大{big_round}/小{sub_idx}/A]"
                 write_status(big_round, sub_idx, "Phase A",
                              total_done=_total_done(), total_target=_total_target(),
@@ -1859,15 +2288,21 @@ def run_death_grip(
                 for f_name, f_reason, f_docname, f_ts, f_rnd in pending:
                     if not _is_eligible(f_name, sub_skipped):
                         continue
+                    # [v1101.4] 先找原失败 doc, 失效就剔除; 找不到 fallback 用 _pick_doc
                     doc_path = None
-                    for d in doc_pool:
+                    for d in list(doc_pool):
                         if os.path.basename(d) == f_docname:
-                            doc_path = d
+                            if os.path.exists(d):
+                                doc_path = d
+                            else:
+                                log(f"  ! 原失败 doc 已删除: {f_docname}, 改抽随机")
+                                doc_pool.remove(d)
                             break
                     if doc_path is None:
-                        if not doc_pool:
+                        doc_path = _pick_doc(doc_pool)
+                        if doc_path is None:
+                            log(f"  Phase B 文档池清空, 提前结束")
                             break
-                        doc_path = random.choice(doc_pool)
                     round_label = f"[大{big_round}/小{sub_idx}/B-{phase_b_round}]"
                     write_status(big_round, sub_idx, f"Phase B-{phase_b_round}",
                                  total_done=_total_done(), total_target=_total_target(),
@@ -1885,9 +2320,14 @@ def run_death_grip(
 
             log(f"\n{log_label}第 {big_round} 大循环 / 第 {sub_idx} 小轮 结束。本小轮跳过 {len(sub_skipped)} 个(下小轮恢复)。硬终止累计 {len(dead_terminated)} 个")
             sent_accounts_set.clear()
-            _clear_round_sheets()
+            # [v1102] sheet 不再小轮末 clear,累积到大循环末才 clear
 
         log(f"\n{'='*20} {log_label}第 {big_round} 大循环 结束 {'='*20}")
+        # [v1102] 全员齐活才 clear 「本轮已发」 sheet
+        active_left = [a for a in accounts if a not in dead_terminated and acc_count.get(a, 0) < per_account_quota.get(a, 0)]
+        if not active_left:
+            _clear_round_sheets()
+            log(f"  [v1102] 大循环全员齐活 → 「本轮已发」 sheet 已清空")
 
     write_status(big_round, sub_rounds, "结束",
                  total_done=_total_done(), total_target=_total_target(),
@@ -1948,16 +2388,18 @@ def main():
     except Exception as _se:
         log(f"读取账号配置.xlsx[永久跳过]失败: {_se}")
 
-    # 读取账号配置.xlsx - 本轮已发sheet（中断恢复时跳过已发账号）
+    # [v1102] 读「本轮已发」sheet → {账号: 已发次数} + 注入 sent_accounts_set
     sent_accounts_set = set()
+    sent_count_map = {}
     try:
-        _sent_list = _read_excel_sheet("本轮已发")
-        for _sv in _sent_list:
+        sent_count_map = _read_sent_with_count()
+        for _sv in sent_count_map:
             sent_accounts_set.add(_sv)
-        if sent_accounts_set:
-            log(f"账号配置.xlsx[本轮已发]已加载，本轮已发: {len(sent_accounts_set)} 个账号（本轮将跳过）")
+        if sent_count_map:
+            log(f"账号配置.xlsx[本轮已发]已加载,已发累计 {sum(sent_count_map.values())} 篇 / {len(sent_count_map)} 个账号")
     except Exception as _se:
         log(f"读取账号配置.xlsx[本轮已发]失败: {_se}")
+    sent_total = sum(sent_count_map.values())
 
     # 读取账号配置.xlsx - 失败列表sheet（中断恢复时继续补发）
     try:
@@ -1996,13 +2438,43 @@ def main():
     try:
         _wl_map = _read_whitelist_with_quota()
         if _wl_map:
-            accounts = [a for a in accounts if any(inc in a or a in inc for inc in _wl_map.keys())]
+            # [v1102.1] 按白名单 dict 顺序重排 accounts(catchup 写白名单按断点环形排)
+            _orig_accounts = list(accounts)
+            _seen = set()
+            _new_accounts = []
+            for inc in _wl_map.keys():
+                for a in _orig_accounts:
+                    if a not in _seen and (inc in a or a in inc):
+                        _new_accounts.append(a)
+                        _seen.add(a)
+                        break
+            accounts = _new_accounts
+            # [v1102.2] 主线主控 v2:读 last_published.txt 拿最近 publish 账号 → 找 idx → 环形重排让下一位置首
+            _last_published_acc = None
+            if LAST_PUBLISHED_FILE and os.path.exists(LAST_PUBLISHED_FILE):
+                try:
+                    with open(LAST_PUBLISHED_FILE, encoding='utf-8') as _lpf:
+                        _lines = [_l.strip() for _l in _lpf if _l.strip()]
+                        if _lines:
+                            _last_published_acc = _lines[-1].split('|')[0].strip()
+                except Exception as _e:
+                    log(f"  [v1102.2] last_published.txt 读取失败: {_e}")
+            if _last_published_acc and accounts:
+                _last_idx = -1
+                for _i, _a in enumerate(accounts):
+                    if _last_published_acc in _a or _a in _last_published_acc:
+                        _last_idx = _i
+                        break
+                if _last_idx >= 0:
+                    _next = (_last_idx + 1) % len(accounts)
+                    accounts = accounts[_next:] + accounts[:_next]
+                    log(f"  [v1102.2] 中断处自动接续:最近 publish「{_last_published_acc}」(idx={_last_idx}) → 从下一位「{accounts[0]}」起跑")
             for a in accounts:
                 for inc, q in _wl_map.items():
                     if inc in a or a in inc:
                         quota_map[a] = q
                         break
-            log(f"账号配置.xlsx[白名单]已加载,白名单 {len(_wl_map)} 个,过滤后剩 {len(accounts)} 个账号")
+            log(f"账号配置.xlsx[白名单]已加载,白名单 {len(_wl_map)} 个,过滤+重排后剩 {len(accounts)} 个账号(首位={accounts[0] if accounts else '空'})")
             log(f"白名单配额: {quota_map}")
     except Exception as _e:
         log(f"读取账号配置.xlsx[白名单]失败: {_e}")
@@ -2014,7 +2486,7 @@ def main():
 
     # 没有白名单独立配额 → 全局 = 总篇数 ÷ 账号数
     if not quota_map:
-        quota = len(docs) // len(accounts) if len(accounts) > 0 else 1
+        quota = (len(docs) + sent_total) // len(accounts) if len(accounts) > 0 else 1  # [v1102] 加已发累计
         quota = max(quota, 1)
         quota_map = {a: quota for a in accounts}
         log(f"本次发布: {len(accounts)} 个账号,{len(docs)} 篇文档,每账号配额 {quota} 篇")
@@ -2036,6 +2508,7 @@ def main():
         credit_records=credit_records,
         fail_records=fail_records,
         success_accounts=success_accounts,
+        initial_acc_count=sent_count_map,  # [v1102] 传入已发次数,主循环 acc_count<quota 自然停
     )
 
     acc_count        = result["acc_count"]

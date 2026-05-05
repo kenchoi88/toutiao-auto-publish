@@ -1913,6 +1913,13 @@ def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None):
 
         for i in range(20):
             time.sleep(0.5)
+            if i == 10 and not confirm_clicked:
+                log(f"  [V1102.3] 5s 未见确认发布,补点预览并发布 ({preview_x},{preview_y})")
+                win32api.SetCursorPos((preview_x, preview_y))
+                time.sleep(0.05)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                time.sleep(0.05)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
             v2 = js(wsc, """
             (function(){
                 var btns = document.querySelectorAll('button');

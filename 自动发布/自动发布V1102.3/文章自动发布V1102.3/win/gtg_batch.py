@@ -51,6 +51,8 @@ RUN_REPORT_DIR = None
 LOG_FILE       = None
 FAIL_FILE      = None
 NOTICE_FILE    = None
+NOTICE_CHECKED_FILE = None  # [v1102] 持久化已检查账号集合(中断恢复后仍只读 1 次)
+LAST_PUBLISHED_FILE = None  # [v1102] 持久化最近 publish 成功账号(中断恢复后从此账号下一位起跑)
 ALERT_FILE     = None
 VIOLATION_FILE = None
 
@@ -67,7 +69,7 @@ os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 # ========== 运行报告目录 ==========
 
 def _init_run_dir():
-    global LOG_FILE, FAIL_FILE, NOTICE_FILE, ALERT_FILE, VIOLATION_FILE, RUN_REPORT_DIR
+    global LOG_FILE, FAIL_FILE, NOTICE_FILE, NOTICE_CHECKED_FILE, LAST_PUBLISHED_FILE, ALERT_FILE, VIOLATION_FILE, RUN_REPORT_DIR
     from datetime import datetime as _dt
     ts = _dt.now().strftime("%Y%m%d")
     RUN_REPORT_DIR = os.path.join(BASE_DIR, "运行报告", ts)
@@ -75,6 +77,8 @@ def _init_run_dir():
     LOG_FILE       = os.path.join(RUN_REPORT_DIR, "运行日志.txt")
     FAIL_FILE      = os.path.join(RUN_REPORT_DIR, "失败记录.xlsx")
     NOTICE_FILE    = os.path.join(RUN_REPORT_DIR, "系统通知.txt")
+    NOTICE_CHECKED_FILE = os.path.join(RUN_REPORT_DIR, "notice_checked.txt")  # [v1102] 已检查账号持久化
+    LAST_PUBLISHED_FILE = os.path.join(RUN_REPORT_DIR, "last_published.txt")  # [v1102] 最近 publish 成功账号持久化
     ALERT_FILE     = os.path.join(RUN_REPORT_DIR, "高阅读提醒.txt")
     VIOLATION_FILE = os.path.join(RUN_REPORT_DIR, "违规提醒.txt")
 
@@ -152,18 +156,56 @@ def _read_excel_sheet(sheet_name):
         return []
 
 def _append_sent_excel(name):
+    """[v1102] 写「本轮已发」sheet:行存在 count+1,不存在 append (账号, 1)"""
     try:
         _ensure_config_excel()
         wb = openpyxl.load_workbook(CONFIG_EXCEL)
         if "本轮已发" not in wb.sheetnames:
             ws_s = wb.create_sheet("本轮已发")
-            ws_s.append(["账号名"])
+            ws_s.append(["账号名", "已发次数"])
+            ws_s.append([name, 1])
         else:
             ws_s = wb["本轮已发"]
-        ws_s.append([name])
+            found_row = None
+            for row_idx, row in enumerate(ws_s.iter_rows(min_row=2, max_col=2, values_only=False), start=2):
+                if row[0].value and str(row[0].value).strip() == name:
+                    found_row = row_idx
+                    break
+            if found_row:
+                cur = ws_s.cell(row=found_row, column=2).value or 0
+                try: cur = int(cur)
+                except: cur = 0
+                ws_s.cell(row=found_row, column=2).value = cur + 1
+            else:
+                ws_s.append([name, 1])
         wb.save(CONFIG_EXCEL)
     except Exception:
         pass
+
+
+def _read_sent_with_count():
+    """[v1102] 读「本轮已发」sheet → {账号: 已发次数}"""
+    if not os.path.exists(CONFIG_EXCEL):
+        return {}
+    try:
+        wb = openpyxl.load_workbook(CONFIG_EXCEL, read_only=True, data_only=True)
+        if "本轮已发" not in wb.sheetnames:
+            wb.close(); return {}
+        ws_r = wb["本轮已发"]
+        result = {}
+        for row in ws_r.iter_rows(min_row=2, max_col=2, values_only=True):
+            if not row or not row[0]: continue
+            name = str(row[0]).strip()
+            if not name or name.startswith('#'): continue
+            cnt = 1
+            if len(row) > 1 and row[1] is not None:
+                try: cnt = int(row[1])
+                except: cnt = 1
+            result[name] = cnt
+        wb.close()
+        return result
+    except Exception:
+        return {}
 
 def _append_fail_list(name, reason, doc_name, round_num):
     try:
@@ -1085,15 +1127,18 @@ def get_url_from_ws(ws_url):
 
 def check_system_notice(ws_url, account_name):
     """
-    导航到消息中心 → 分别点击系统通知、审核通知频道
-    → 读取当天+昨天的消息原文，识别违规关键词
-    → 通知写入 NOTICE_FILE；违规写入 VIOLATION_FILE
-    → 返回 (notice_count, violation_count)
+    [v1102] 导航到消息中心 → 点击 系统通知 + 审核通知 频道
+    → 读取 2 天内(今天+昨天)的完整消息原文写入 NOTICE_FILE
+    新 selector: .conversation-box.notify-im-user-item (替代旧 span.name)
+    新提取: body.innerText 按日期行切分(MM-DD HH:MM / YYYY-MM-DD / 昨日/今日 HH:MM)
     """
     try:
         today = datetime.now()
-        today_full  = today.strftime("%Y-%m-%d")
-        today_short = today.strftime("%m-%d")
+        yesterday = today - timedelta(days=1)
+        today_short     = today.strftime("%m-%d")
+        yesterday_short = yesterday.strftime("%m-%d")
+        today_full      = today.strftime("%Y-%m-%d")
+        yesterday_full  = yesterday.strftime("%Y-%m-%d")
 
         wsc = ws_connect(ws_url, timeout=8)
         js(wsc, "location.href='https://mp.toutiao.com/profile_v4/personal/message?type=message_letter'", 300)
@@ -1101,17 +1146,19 @@ def check_system_notice(ws_url, account_name):
         time.sleep(3)
 
         wsc = ws_connect(ws_url, timeout=8)
+        time.sleep(2.5)
         notices = []
 
         for channel in ["系统通知", "审核通知"]:
             channel_json = channel.replace('"', '\\"')
             clicked = js(wsc, f"""
             (function(){{
-                var spans = document.querySelectorAll('span.name');
-                for(var i=0;i<spans.length;i++){{
-                    if(spans[i].textContent.trim() === "{channel_json}"){{
-                        var box = spans[i].closest('.conversation-box-primary') || spans[i].parentElement;
-                        if(box){{ box.click(); return 'ok'; }}
+                var items = document.querySelectorAll('.conversation-box.notify-im-user-item');
+                for(var i=0; i<items.length; i++){{
+                    var t = (items[i].innerText || '').trim();
+                    if(t.indexOf("{channel_json}") === 0){{
+                        items[i].click();
+                        return 'ok';
                     }}
                 }}
                 return null;
@@ -1125,27 +1172,52 @@ def check_system_notice(ws_url, account_name):
             time.sleep(2.5)
 
             result = js(wsc, f"""
-            (function(){{
-                var keys = ["{today_full}","{today_short}"];
-                var list = document.querySelector('.chat-container-list');
-                if(!list) return JSON.stringify([]);
-                var items = list.children;
+            (function() {{
+                var todayShort = "{today_short}";
+                var yesterdayShort = "{yesterday_short}";
+                var todayFull = "{today_full}";
+                var yesterdayFull = "{yesterday_full}";
+                var lines = (document.body.innerText || '').split(/\\r?\\n/);
                 var results = [];
-                var matched = false;
-                for(var i=0;i<items.length;i++){{
-                    var cls = items[i].className || '';
-                    if(cls.indexOf('time-stamp') !== -1){{
-                        var t = items[i].textContent.trim();
-                        matched = false;
-                        for(var k=0;k<keys.length;k++){{
-                            if(t.indexOf(keys[k]) !== -1){{ matched = true; break; }}
+                var current = '';
+                var currentDate = '';
+                var inWindow = false;
+                function dateInfo(line) {{
+                    var m = line.match(/^(\\d{{2}}-\\d{{2}})\\s+\\d{{2}}:\\d{{2}}$/);
+                    if (m) return m[1] === todayShort || m[1] === yesterdayShort;
+                    m = line.match(/^(\\d{{4}}-\\d{{2}}-\\d{{2}})\\s+\\d{{2}}:\\d{{2}}$/);
+                    if (m) return m[1] === todayFull || m[1] === yesterdayFull;
+                    if (/^昨日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    if (/^今日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    return null;
+                }}
+                function isDateLine(line) {{
+                    return /^(\\d{{2}}-\\d{{2}}|\\d{{4}}-\\d{{2}}-\\d{{2}}|昨日|今日)\\s+\\d{{2}}:\\d{{2}}$/.test(line);
+                }}
+                for (var i = 0; i < lines.length; i++) {{
+                    var line = lines[i].trim();
+                    if (!line) continue;
+                    if (isDateLine(line)) {{
+                        if (inWindow && current.trim()) {{
+                            results.push(currentDate + '\\n' + current.trim());
                         }}
-                    }} else if(matched && cls.indexOf('chat-row') !== -1){{
-                        var txt = items[i].textContent.trim();
-                        if(txt) results.push(txt);
+                        currentDate = line;
+                        current = '';
+                        inWindow = (dateInfo(line) === true);
+                    }} else if (inWindow) {{
+                        current += line + '\\n';
                     }}
                 }}
-                return JSON.stringify(results);
+                if (inWindow && current.trim()) {{
+                    results.push(currentDate + '\\n' + current.trim());
+                }}
+                var seen = {{}};
+                var dedup = [];
+                for (var k = 0; k < results.length; k++) {{
+                    var key = results[k].substring(0, 80);
+                    if (!seen[key]) {{ seen[key] = true; dedup.push(results[k]); }}
+                }}
+                return JSON.stringify(dedup);
             }})()
             """, 302)
 
@@ -1153,46 +1225,41 @@ def check_system_notice(ws_url, account_name):
                 try:
                     msgs = json.loads(result)
                     for msg in msgs:
-                        notices.append((channel, msg))
-                except Exception:
+                        notices.append(f"【{channel}】\n{msg}")
+                except:
                     pass
 
         wsc.close()
 
-        violations = []
-        for ch, msg in notices:
-            hit_cats = []
-            for cat, kws in VIOLATION_KEYWORDS.items():
-                for kw in kws:
-                    if kw in msg:
-                        hit_cats.append(cat)
-                        break
-            if hit_cats:
-                violations.append((ch, msg, hit_cats))
-
+        violation_count = 0
         if notices:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-            content_str = f"[{ts}] 账号 {account_name} 当天通知 {len(notices)} 条:\n"
-            for ch, msg in notices:
-                content_str += f"  【{ch}】{msg}\n"
-            content_str += "\n"
+            ts_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            violations = []
+            for n in notices:
+                for cat, kws in VIOLATION_KEYWORDS.items():
+                    for kw in kws:
+                        if kw in n:
+                            violations.append((cat, n))
+                            break
+            content_str = f"\n[{ts_str}] 账号 {account_name} 2 天内通知 ({len(notices)} 条):\n"
+            for n in notices:
+                content_str += f"\n--- 通知 ---\n{n}\n"
+            content_str += "\n" + "=" * 60 + "\n"
             with open(NOTICE_FILE, "a", encoding="utf-8") as f:
                 f.write(content_str)
-            log(f"  ⚠ 当天通知 {len(notices)} 条 → 已写入系统通知.txt")
+            log(f"  ⚠ 2 天内通知 {len(notices)} 条 → 系统通知.txt")
+            if violations:
+                vcontent = f"[{ts_str}] 账号 {account_name} 违规/扣分提醒:\n"
+                for cat, msg in violations:
+                    vcontent += f"  [{cat}] {msg[:300]}...\n"
+                vcontent += "\n"
+                with open(VIOLATION_FILE, "a", encoding="utf-8") as f:
+                    f.write(vcontent)
+                violation_count = len(violations)
+                log(f"  ⚠ 违规/扣分 {violation_count} 条 → 违规提醒.txt")
         else:
-            log("  系统/审核通知: 当天无新通知")
-
-        if violations:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-            vstr = f"[{ts}] 账号 {account_name} 命中违规 {len(violations)} 条:\n"
-            for ch, msg, cats in violations:
-                vstr += f"  【{ch}】[{','.join(cats)}] {msg}\n"
-            vstr += "\n"
-            with open(VIOLATION_FILE, "a", encoding="utf-8") as f:
-                f.write(vstr)
-            log(f"  ★★ 违规命中 {len(violations)} 条 → 已写入违规提醒.txt")
-
-        return len(notices), len(violations)
+            log("  系统/审核通知: 2 天内无新通知")
+        return len(notices), violation_count
     except Exception as e:
         log(f"  系统通知检测出错: {e}")
         return 0, 0
@@ -1328,7 +1395,7 @@ def read_docx_text(doc_path):
 
 # ========== 发布流程 ==========
 
-def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None, schedule_time=None):
+def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None):
 
     try:
         wsc = ws_connect(ws_url, timeout=10)
@@ -1490,7 +1557,7 @@ def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None, schedu
             import_y = wv0['sy'] + pi['y']
             log(f"  拉回后 webview 原点: ({wv0['sx']},{wv0['sy']}) → 导入坐标 ({import_x},{import_y})")
 
-    # [v1101 P7] click 文档导入 + 等弹窗,失败重试 3 次(每次重 SetForegroundWindow + 重读坐标)
+    # [v1101 P7] click 文档导入 + 等弹窗,失败重试 3 次
     sel = None
     for click_attempt in range(3):
         attempt_str = f" [第{click_attempt+1}次]" if click_attempt > 0 else ""
@@ -1501,8 +1568,7 @@ def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None, schedu
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
         log(f"  cliclick 点击文档导入 ({import_x},{import_y}){attempt_str}")
         time.sleep(1.5)
-
-        for _ in range(60):  # 30s timeout per attempt(原 360 是 3 分钟,改 30s 让重试有意义)
+        for _ in range(60):
             sel = js(wsc, """
             (function(){
                 var btns = document.querySelectorAll('button');
@@ -1518,12 +1584,10 @@ def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None, schedu
             if sel:
                 break
             time.sleep(0.5)
-
         if sel:
             if click_attempt > 0:
                 log(f"  P7 第{click_attempt+1}次成功唤出弹窗")
             break
-
         if click_attempt < 2:
             log(f"  弹窗未出,重 SetForegroundWindow + 重读坐标后重试")
             if electron_pid:
@@ -1547,7 +1611,6 @@ def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None, schedu
                 import_x = wv0['sx'] + pi['x']
                 import_y = wv0['sy'] + pi['y']
                 log(f"  重试前坐标更新: ({import_x},{import_y})")
-
     if not sel:
         wsc.close()
         return False, "文档导入弹窗未出现(3 次 click 重试均失败)"
@@ -1828,292 +1891,6 @@ def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None, schedu
                 return False, "首发取消失败(硬保护)"
 
 
-    # ===================== 定时发布分支 =====================
-    if schedule_time:
-        try:
-            dt = datetime.strptime(schedule_time, "%Y-%m-%d %H:%M")
-        except Exception:
-            wsc.close()
-            return False, f"定时时间格式错误: {schedule_time}"
-        t_date1 = f"{dt.month}月{dt.day}日"
-        t_date2 = f"{dt.month:02d}月{dt.day:02d}日"
-        t_hour1 = str(dt.hour)
-        t_hour2 = f"{dt.hour:02d}"
-        t_min   = f"{dt.minute:02d}"
-        t_min_alt = str(dt.minute)
-
-        # 1. 点底栏「定时发布」按钮（default 状态），等弹窗
-        popup_opened = False
-        for attempt in range(5):
-            pos = js(wsc, """
-            (function(){
-                var btns = document.querySelectorAll('button');
-                for(var i=0;i<btns.length;i++){
-                    var t = btns[i].textContent.trim();
-                    if(t === '定时发布' && !btns[i].disabled){
-                        var r = btns[i].getBoundingClientRect();
-                        if(r.width > 0) return JSON.stringify({x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)});
-                    }
-                }
-                return null;
-            })()
-            """, 149 + attempt * 3)
-            if not pos:
-                if attempt == 0:
-                    wsc.close()
-                    return False, "找不到定时发布按钮"
-                time.sleep(1); continue
-            p = json.loads(pos)
-            wv_cur_r = js(main_ws, """
-            (function(){
-                var wvs = document.querySelectorAll('webview');
-                var maxA = 0, best = null;
-                for(var i=0;i<wvs.length;i++){
-                    var r = wvs[i].getBoundingClientRect();
-                    var a = r.width*r.height;
-                    if(a > maxA){ maxA = a; best = r; }
-                }
-                if(!best) return null;
-                return JSON.stringify({sx: Math.round(window.screenX+best.left), sy: Math.round(window.screenY+best.top)});
-            })()
-            """, 150 + attempt * 3)
-            wv_cur = json.loads(wv_cur_r) if wv_cur_r else wv0
-            sx = wv_cur['sx'] + p['x']
-            sy = wv_cur['sy'] + p['y']
-            attempt_str = f" [第{attempt+1}次]" if attempt > 0 else ""
-            log(f"  win32 点定时发布 ({sx},{sy}){attempt_str}")
-            win32api.SetCursorPos((sx, sy))
-            time.sleep(0.5)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            time.sleep(0.05)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            time.sleep(3)
-            for _ in range(30):
-                v_cnt = js(wsc, """(function(){var bs=document.querySelectorAll('button');for(var i=0;i<bs.length;i++){var t=bs[i].textContent.trim();if(t==='预览并定时发布')return 1;}return 0;})()""", 151 + attempt * 3)
-                if v_cnt and int(v_cnt) >= 1:
-                    popup_opened = True
-                    break
-                time.sleep(0.5)
-            if popup_opened:
-                log(f"  定时弹窗已打开（第{attempt+1}次成功）")
-                break
-            log(f"  第{attempt+1}次点击后弹窗未开，重试")
-        if not popup_opened:
-            wsc.close()
-            return False, "定时发布点击后弹窗始终未打开"
-
-        # 2. 选日期/时/分（罐头当前 UI = byte-select）
-        def click_select_option(select_idx, targets, mid_base):
-            slist = []
-            for _ in range(30):
-                sels_r = js(wsc, """
-                (function(){
-                    var sels = document.querySelectorAll('.byte-modal.common-timing-picker .byte-select-view');
-                    var out = [];
-                    for(var i=0;i<sels.length;i++){
-                        var r = sels[i].getBoundingClientRect();
-                        if(r.width > 0 && r.height > 0)
-                            out.push({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)});
-                    }
-                    return JSON.stringify(out);
-                })()
-                """, mid_base)
-                if sels_r:
-                    slist = json.loads(sels_r)
-                    if len(slist) > select_idx: break
-                time.sleep(0.3)
-            if select_idx >= len(slist):
-                log(f"  select_idx={select_idx} 超出范围(共{len(slist)}个)")
-                return False
-            s = slist[select_idx]
-            wv_cur_r = js(main_ws, """
-            (function(){
-                var wvs = document.querySelectorAll('webview');
-                var maxA = 0, best = null;
-                for(var i=0;i<wvs.length;i++){
-                    var r = wvs[i].getBoundingClientRect();
-                    var a = r.width*r.height;
-                    if(a > maxA){ maxA = a; best = r; }
-                }
-                if(!best) return null;
-                return JSON.stringify({sx: Math.round(window.screenX+best.left), sy: Math.round(window.screenY+best.top)});
-            })()
-            """, mid_base + 9)
-            wv_now = json.loads(wv_cur_r) if wv_cur_r else wv0
-            sx = wv_now['sx'] + s['x']
-            sy = wv_now['sy'] + s['y']
-            log(f"  win32 点开第{select_idx+1}个下拉 ({sx},{sy})")
-            win32api.SetCursorPos((sx, sy))
-            time.sleep(0.3)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            time.sleep(0.05)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            time.sleep(0.8)
-            js(wsc, """
-            (function(){
-                var lists = document.querySelectorAll('.byte-select-popup, .byte-select-popup-inner');
-                for(var i=0;i<lists.length;i++){
-                    var r = lists[i].getBoundingClientRect();
-                    if(r.width > 0 && r.height > 0){ lists[i].scrollTop = 0; }
-                }
-            })()
-            """, mid_base - 1)
-            time.sleep(0.3)
-            for _ in range(20):
-                js_clicked = js(wsc, f"""
-                (function(){{
-                    var targets = {json.dumps(targets)};
-                    var items = document.querySelectorAll('.byte-select-popup li.byte-select-option, .byte-select-popup-inner > li');
-                    for(var i=0;i<items.length;i++){{
-                        var t = items[i].textContent.trim();
-                        for(var j=0;j<targets.length;j++){{
-                            if(t === targets[j]){{
-                                items[i].scrollIntoView({{block:'center', behavior:'instant'}});
-                                var ev = ['mousedown','mouseup','click'];
-                                for(var k=0;k<ev.length;k++){{
-                                    items[i].dispatchEvent(new MouseEvent(ev[k],{{bubbles:true,cancelable:true,view:window}}));
-                                }}
-                                return 'clicked:' + targets[j];
-                            }}
-                        }}
-                    }}
-                    return null;
-                }})()
-                """, mid_base + 1)
-                if js_clicked:
-                    log(f"  JS点击 {js_clicked}")
-                    time.sleep(0.5)
-                    return True
-                js(wsc, """
-                (function(){
-                    var lists = document.querySelectorAll('.byte-select-popup, .byte-select-popup-inner');
-                    for(var i=0;i<lists.length;i++){ lists[i].scrollTop += 80; }
-                })()
-                """, mid_base + 2)
-                time.sleep(0.2)
-            log(f"  未找到目标选项: {targets}")
-            return False
-
-        time.sleep(1.2)
-        if not click_select_option(0, [t_date1, t_date2], 160):
-            wsc.close()
-            return False, f"定时日期设置失败: {t_date1}"
-        if not click_select_option(1, [t_hour1, t_hour2], 170):
-            wsc.close()
-            return False, f"定时小时设置失败: {t_hour1}"
-        if not click_select_option(2, [t_min, t_min_alt], 180):
-            wsc.close()
-            return False, f"定时分钟设置失败: {t_min}"
-
-        log(f"  定时时间设置完成: {schedule_time}")
-        time.sleep(0.5)
-
-        # 3. JS 点「预览并定时发布」
-        prev_clicked = js(wsc, """
-        (function(){
-            var btns = document.querySelectorAll('button');
-            for(var i=0;i<btns.length;i++){
-                var t = btns[i].textContent.trim();
-                if(t.indexOf('预览') !== -1 && t.indexOf('定时') !== -1 && !btns[i].disabled){
-                    btns[i].click();
-                    return 'clicked';
-                }
-            }
-            return null;
-        })()
-        """, 190)
-        if prev_clicked != 'clicked':
-            wsc.close()
-            return False, "找不到预览并定时发布按钮"
-        log("  JS点击预览并定时发布")
-        time.sleep(3)
-
-        # 4. JS 点预览页底栏「定时发布」primary（取最后一个，编辑页同名按钮在前）
-        click_expr = """
-        (function(){
-            var btns = document.querySelectorAll('button');
-            var matched = [];
-            for(var i=0;i<btns.length;i++){
-                var t = btns[i].textContent.trim();
-                if(t === '定时发布' && !btns[i].disabled){
-                    var r = btns[i].getBoundingClientRect();
-                    if(r.width > 0 && r.height > 0) matched.push(btns[i]);
-                }
-            }
-            if(matched.length === 0) return null;
-            matched[matched.length - 1].click();
-            return 'clicked:' + matched.length;
-        })()
-        """
-        confirm_clicked = False
-        for _ in range(60):
-            time.sleep(0.5)
-            v2 = js(wsc, click_expr, 191)
-            if not v2:
-                continue
-            log(f"  JS点击预览页定时发布 ({v2})")
-            confirm_clicked = True
-            for retry in range(2):
-                time.sleep(1.5)
-                still = js(wsc, """
-                (function(){
-                    var btns = document.querySelectorAll('button');
-                    for(var i=0;i<btns.length;i++){
-                        if(btns[i].textContent.trim() === '定时发布' && !btns[i].disabled){
-                            var r = btns[i].getBoundingClientRect();
-                            if(r.width > 0 && r.height > 0) return 1;
-                        }
-                    }
-                    return 0;
-                })()
-                """, 193 + retry)
-                if not still or int(still) == 0:
-                    break
-                log(f"  按钮仍在，补点一次（retry={retry+1}）")
-                js(wsc, click_expr, 195 + retry)
-            break
-
-        if not confirm_clicked:
-            wsc.close()
-            return False, "未出现预览页定时发布按钮"
-
-        # 5. 检测发布成功
-        published = False
-        for _ in range(20):
-            time.sleep(0.5)
-            t_txt = js(wsc, """
-            (function(){
-                var all = document.querySelectorAll('*');
-                for(var i=0;i<all.length;i++){
-                    var t = all[i].textContent.trim();
-                    if((t==='发布成功！'||t==='发布成功'||t==='提交成功！'||t==='提交成功'||t==='定时发布成功')
-                       && all[i].children.length<=1)
-                        return t;
-                }
-                return null;
-            })()
-            """, 196)
-            if t_txt:
-                published = True
-                break
-            cur_url = js(wsc, "location.href", 197) or ""
-            if "graphic" in cur_url and "publish" not in cur_url:
-                published = True
-                break
-
-        if not published:
-            err_after = detect_account_error(wsc)
-            wsc.close()
-            if err_after:
-                return False, err_after
-            return False, "未检测到定时发布成功"
-
-        wsc.close()
-        log(f"  OK 定时发布成功 → {schedule_time}")
-        return True, "成功"
-    # =================== 定时发布分支 END ===================
-
-
     # 点"预览并发布" + 等"确认发布"，最多重试5次
     confirm_clicked = False
     for attempt in range(36):
@@ -2317,7 +2094,19 @@ def run_death_grip(
     ok_count = fail_count = 0
     total_notices = total_violations = total_alerts = 0
     big_round = 0
-    notice_checked_set = set()  # [v1101.6] 每账号每天只读 1 次审核/系统通知
+    # [v1102] 每账号每天只读 1 次,持久化到 NOTICE_CHECKED_FILE,中断恢复后不重读
+    notice_checked_set = set()
+    if NOTICE_CHECKED_FILE and os.path.exists(NOTICE_CHECKED_FILE):
+        try:
+            with open(NOTICE_CHECKED_FILE, encoding='utf-8') as _ncf:
+                for _line in _ncf:
+                    _name = _line.strip().split('|')[0]
+                    if _name:
+                        notice_checked_set.add(_name)
+            if notice_checked_set:
+                log(f"  [v1102] 从 notice_checked.txt 恢复 {len(notice_checked_set)} 个已检查账号(中断恢复)")
+        except Exception as _e:
+            log(f"  [v1102] notice_checked.txt 读取失败: {_e}")
 
     def _do_publish(name, doc, round_label, is_retry=False):
         nonlocal ok_count, fail_count, total_notices, total_violations, total_alerts
@@ -2350,15 +2139,20 @@ def run_death_grip(
             close_current_tab(main_ws)
             return False, "失登"
 
-        # [v1101.6] 每账号每天只读 1 次审核/系统通知 — 后续发文跳过
+        # [v1102] 每账号当天只读 1 次审核/系统通知 — 持久化,中断恢复后仍跳过
         if name not in notice_checked_set:
             _nc, _vc = check_system_notice(ws_url, name)
             total_notices += _nc
             total_violations += _vc
             notice_checked_set.add(name)
+            try:
+                with open(NOTICE_CHECKED_FILE, "a", encoding="utf-8") as _ncf:
+                    _ncf.write(f"{name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            except Exception as _e:
+                log(f"  [v1102] 写 notice_checked.txt 失败: {_e}")
             time.sleep(2)
         else:
-            log(f"  系统/审核通知:{name} 本轮已读过,跳过")
+            log(f"  系统/审核通知:{name} 当天已读过,跳过")
 
         _d_wait = random.randint(8, 20)
         try:
@@ -2369,6 +2163,12 @@ def run_death_grip(
                     doc_pool.remove(doc)
                 acc_count[name] = acc_count.get(name, 0) + 1
                 ok_count += 1
+                # [v1102] 持久化最近 publish 成功账号 → 中断恢复时按此从下一位起跑
+                try:
+                    with open(LAST_PUBLISHED_FILE, "a", encoding="utf-8") as _lpf:
+                        _lpf.write(f"{name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                except Exception as _e:
+                    log(f"  [v1102] 写 last_published.txt 失败: {_e}")
                 _a = check_reading_stats(ws_url, name)
                 total_alerts += (_a or 0)
                 return True, ""
@@ -2422,8 +2222,14 @@ def run_death_grip(
                   if a not in dead_terminated
                   and acc_count.get(a, 0) < per_account_quota.get(a, 0)]
         if not active:
-            log(f"\n{log_label}所有账号都已满 quota,死磕结束")
-            break
+            log(f"\n{log_label}所有账号配额暂时满,等 60s 重扫素材池(只 doc_pool 空 / Ctrl+C 才停)...")
+            time.sleep(60)
+            cur_set = set(doc_pool)
+            new_docs = [d for d in get_docs() if d not in cur_set]
+            if new_docs:
+                log(f"  + 发现 {len(new_docs)} 篇新素材,加入文档池")
+                doc_pool.extend(new_docs)
+            continue
 
         # [v1101.4] 大循环开头重扫池, 实时同步外部 mutate (scp+rm 等)
         _removed, _added = _resync_pool(doc_pool)
@@ -2518,9 +2324,14 @@ def run_death_grip(
             # ----- 小轮收尾:本小轮的临时跳过名单清空,下小轮全员可再尝试 -----
             log(f"\n{log_label}第 {big_round} 大循环 / 第 {sub_idx} 小轮 结束。本小轮跳过 {len(sub_skipped)} 个(下小轮恢复)。硬终止累计 {len(dead_terminated)} 个")
             sent_accounts_set.clear()
-            _clear_round_sheets()
+            # [v1102] sheet 不再小轮末 clear,累积到大循环末才 clear
 
         log(f"\n{'='*20} {log_label}第 {big_round} 大循环 结束 {'='*20}")
+        # [v1102] 全员齐活才 clear 「本轮已发」 sheet
+        active_left = [a for a in accounts if a not in dead_terminated and acc_count.get(a, 0) < per_account_quota.get(a, 0)]
+        if not active_left:
+            _clear_round_sheets()
+            log(f"  [v1102] 大循环全员齐活 → 「本轮已发」 sheet 已清空")
 
     write_status(big_round, sub_rounds, "结束",
                  total_done=_total_done(), total_target=_total_target(),
@@ -2624,13 +2435,48 @@ def main():
     # per_account_quota: 本次每个账号要发几篇
     per_account_quota = {}
 
+    # [v1102] quota 动态算 = (素材池 + 已发累计) // 账号数
+    sent_count_map = _read_sent_with_count()
+    sent_total = sum(sent_count_map.values())
+
     # 正常模式：读"白名单"A 列（账号名）+ B 列（可选配额）
     whitelist_with_q = _read_whitelist_with_quota()
     if whitelist_with_q:
         wl_map = {n: q for n, q in whitelist_with_q}
-        accounts = [a for a in accounts if any(wn in a or a in wn for wn in wl_map)]
-        log(f"账号配置.xlsx[白名单]已加载，白名单 {len(wl_map)} 个，过滤后剩 {len(accounts)} 个账号")
-        default_q = max(1, len(docs) // len(accounts)) if accounts else 1
+        # [v1102.1] 按白名单顺序重排 accounts(catchup 写白名单是环形重排,主循环必须用此顺序才能从断点开始)
+        _orig_accounts = list(accounts)
+        _new_accounts = []
+        _seen = set()
+        for wn, _wq in whitelist_with_q:
+            for a in _orig_accounts:
+                if a not in _seen and (wn in a or a in wn):
+                    _new_accounts.append(a)
+                    _seen.add(a)
+                    break
+        accounts = _new_accounts
+        # [v1102 主线主控 v2] 自动接续中断处:读 last_published.txt 拿最近 publish 账号 → 找 idx → 环形重排让下一位置首
+        # 版本说明 line 632「中断在第 X 轮第 Y 账号 → 重启从该轮该账号继续」
+        _last_published_acc = None
+        if LAST_PUBLISHED_FILE and os.path.exists(LAST_PUBLISHED_FILE):
+            try:
+                with open(LAST_PUBLISHED_FILE, encoding='utf-8') as _lpf:
+                    _lines = [_l.strip() for _l in _lpf if _l.strip()]
+                    if _lines:
+                        _last_published_acc = _lines[-1].split('|')[0].strip()
+            except Exception as _e:
+                log(f"  [v1102] last_published.txt 读取失败: {_e}")
+        if _last_published_acc and accounts:
+            _last_idx = -1
+            for _i, _a in enumerate(accounts):
+                if _last_published_acc in _a or _a in _last_published_acc:
+                    _last_idx = _i
+                    break
+            if _last_idx >= 0:
+                _next = (_last_idx + 1) % len(accounts)
+                accounts = accounts[_next:] + accounts[:_next]
+                log(f"  [v1102] 中断处自动接续:最近 publish「{_last_published_acc}」(idx={_last_idx}) → 从下一位「{accounts[0]}」起跑")
+        log(f"账号配置.xlsx[白名单]已加载，白名单 {len(wl_map)} 个，过滤+重排后剩 {len(accounts)} 个账号(首位={accounts[0] if accounts else '空'})")
+        default_q = max(1, (len(docs) + sent_total) // len(accounts)) if accounts else 1
         for a in accounts:
             matched_q = None
             for wn, wq in wl_map.items():
@@ -2639,7 +2485,7 @@ def main():
                     break
             per_account_quota[a] = matched_q if matched_q is not None else default_q
     else:
-        default_q = max(1, len(docs) // len(accounts)) if accounts else 1
+        default_q = max(1, (len(docs) + sent_total) // len(accounts)) if accounts else 1
         for a in accounts:
             per_account_quota[a] = default_q
     total_target = sum(per_account_quota.values())
@@ -2664,6 +2510,7 @@ def main():
         max_fail_per_sub=3,
         sent_accounts_set=sent_accounts_set,
         credit_records=credit_records,
+        initial_acc_count=sent_count_map,  # [v1102] 传入已发次数
     )
 
     acc_count        = result["acc_count"]
@@ -2717,7 +2564,7 @@ def main():
         f"{'='*60}",
         f"运行汇总 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"{'='*60}",
-        f"类型    : 定时立即发布(死磕模式)",
+        f"类型    : 文章发布(死磕模式)",
         f"报告目录: {RUN_REPORT_DIR}",
         f"",
         f"成功发布: {ok_count} 篇",

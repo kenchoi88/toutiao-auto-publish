@@ -1683,6 +1683,9 @@ end tell
         # 等"确认发布"按钮
         for i in range(60):
             time.sleep(0.5)
+            if i == 10 and not confirm_clicked:
+                log(f"  [V1102.3] 5s 未见确认发布,补点预览并发布 ({preview_x},{preview_y})")
+                subprocess.run(["cliclick", f"c:{preview_x},{preview_y}"], capture_output=True)
             v2 = js(wsc, """
             (function(){
                 var btns = document.querySelectorAll('button');
