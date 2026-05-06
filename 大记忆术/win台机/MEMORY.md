@@ -20,13 +20,14 @@
 - [两轮筛选协作](feedback_两轮筛选协作.md) — Claude 第一轮按黑名单粗筛+列出剔除原因,用户第二轮精挑;边界模糊倾向剔除
 - [误杀回收闭环](feedback_误杀回收闭环.md) — 用户会从剔除里捡回误杀,登记理由+调整规则,这是规则校准主来源
 - [罐头爆款下载流程](reference_罐头爆款下载流程.md) — 触发词「下载爆款」→ Win 台机 cd 罐头爆款下载/ + python 罐头爆款下载.py;前提 CDP 9223 在线;领域 19 个(2026-05-02 删法律加综艺)
+- [罐头xlsx结构(自带"领域"字段)](reference_罐头xlsx结构.md) — 9 列含「领域」分类字段,「标题」列实际是文章正文;过滤代码用「领域」直接,别 keyword 推断板块造轮子(2026-05-06 实证)
 - [素材筛选流水线节奏](project_素材筛选流水线节奏.md) — 罐头 2000→v0→Claude→用户≈1500/批,一天用,需每日再下补充
-- [删除集学到的16类规则](feedback_删除集学到的11类规则.md) — A极短/B重复/C诅咒外领/D反日/E抗战/F性犯罪/G实名八卦/H价格/I反腐/J玄学/K猎奇 + 04-29 L性健康/M政治阴谋论/N自杀拐卖/O给功臣泼脏水 + 05-06 P分娩家庭成员铺垫诱导低俗(实证 4 过 1 抽,坚持梦想扣 70 分案例)
+- [删除集学到的19类规则 + 6大过严点](feedback_删除集学到的11类规则.md) — A极短/B重复/C诅咒外领/D反日/E抗战/F性犯罪/G实名八卦/H价格/I反腐/J玄学/K猎奇 + 04-29 L性健康/M政治阴谋论/N自杀拐卖/O给功臣泼脏水 + 05-06 P分娩+A2地方人物侵权(19%)+B2重大事故蹭热度+J2政务+K2伟人,身体词58篇缺哥列;同日 95 误删反映 6 大过严点(POLI/极短板块差异/印度硬剔/EXAGG情绪词/SUGGEST单字/旧年代豁免)
 - [MCN数据每日下载](project_MCN数据每日下载.md) — Win 台机桌面 MCN数据下载/,每天 Claude 接手跑下载.bat,xlsx 待用户从 air 拷
 - [角色代号](reference_角色代号.md) — 缺哥(用户)+ 5 本地机 + 云端:绣虎(Win/我)、阿良(air)、小齐+小师弟(neo)、左右(neo2 待建)、东山(mini,我分身)、暖树+景清(腾讯云端)
 - [SSH 用户名规律](reference_SSH用户名规律.md) — ⚠️ **neo SSH 用户名是 `kenchoios`(1 个 i,不是 kenchoiios!)**;5 机 ComputerName 已统一 KenChoi+机器名(2026-05-02)
 - [统一密码](reference_统一密码.md) — 5 台机 sudo / 登录共用一个密码,sudo -S 走 stdin 喂入,别写 argv
-- [Tailscale 网络](reference_Tailscale网络.md) — kenchoi315@gmail.com tailnet;台机/mini/neo2/neo 在线,air offline 3d
+- ❗ [Tailscale 网络](reference_Tailscale网络.md) — kenchoi315@gmail.com tailnet;5 机 IP:台机100.86.79.39/mini100.70.22.7/neo100.68.57.96/neo2100.96.153.17/air100.126.82.58(2026-05-06 漂);**跨机命令前必先 grep 本表/`tailscale status`,别脑补 IP**(2026-05-06 推 246 抽风教训)
 - [Shadowrocket Tailscale bypass](reference_Shadowrocket_Tailscale_bypass.md) — 4 Mac 火箭必须放行 100.64.0.0/10,否则跨机 TCP 全挂(ICMP 通误导)
 - ❗ [4 Mac Shadowrocket 必须三层放行 100.64.0.0/10](feedback_shadowrocket_skip_proxy.md) — docid=2 skip-proxy + docid=3 tun-excluded + Rule 段三层缺一切 SSID 必踩(2026-05-06 mini+neo 实证补漏);切 SSID 时 fake-DNS 还劫 controlplane,daemon 用 plist HTTPS_PROXY=127.0.0.1:1082 自救;别用 tailscale ssh wrapper 还是 100.x 直连
 - ❗ [Mac 切网必软修 + 三查清单](feedback_Mac出门归来三查清单.md) — 任何 SSID 切换(出门/回家/酒店/热点)路由 100.64 被新网关抢,跨机 TCP 全 fail;**切网第零步必做** `tailscale down && up` 软修(无副作用 ~7秒),然后三查;四网实证 q6/5G/4G/AX3 切回 100% 复现,包括切回家里也中招(2026-05-06 凌晨实战)

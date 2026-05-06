@@ -10,9 +10,13 @@ originSessionId: f99b6b5b-4ea0-48d9-baf7-b1b507d56ce3
 |---|---|---|---|
 | Win 台机 / 绣虎 | `ken-choi` | 100.86.79.39 | 在线 |
 | mini / 东山 | `mini` | 100.70.22.7 | 2026-04-28 force-reauth(阿良瞎搞 Shadowrocket 把 mini 弄掉线 → 重新授权 NodeKey + 新 IP) |
-| air / 阿良 | `air` | 100.67.252.1 | 2026-04-27 brew CLI 重装(LaunchDaemon 持久化);旧节点 `kenmacbook-air` 100.102.128.15 = GUI 版僵尸,admin console 删除;**2026-05-01 16:09 实测 idle 在线 + SSH 通**(走 Tailscale SSH,首次需浏览器一次性审批 https://login.tailscale.com/a/...) |
+| air / 阿良 | `air` | **100.126.82.58 (2026-05-06 现状,旧 100.67.252.1 已漂)** | 2026-04-27 brew CLI 重装(LaunchDaemon 持久化);旧节点 `kenmacbook-air` 100.102.128.15 = GUI 版僵尸,admin console 删除;**2026-05-01 16:09 实测 idle 在线 + SSH 通**(走 Tailscale SSH,首次需浏览器一次性审批 https://login.tailscale.com/a/...);2026-05-05~06 五小时 Tailscale 故障会话后 IP 漂到 100.126.82.58 |
 | neo2 / 左右 | `neo2` | 100.96.153.17 | 2026-04-27 17:50 上线 |
 | neo / 小齐+小师弟 | `neo` | 100.68.57.96 | 2026-04-27 18:25 上线;2026-04-28 21:40 admin rename `mac` → `neo`(关 Auto-generate + 手填),根因是该机 macOS HostName=mac,要彻底要 `sudo scutil --set HostName/LocalHostName/ComputerName neo` + 重启 Tailscale daemon |
+
+⚠️ **2026-05-06 抽风教训** — 我 ssh 跨机前没查本表,脑补把 mini=100.86.79.39 / neo=100.70.22.7 / air=100.68.57.96(全错), 实际 100.86=台机自身/100.70=mini/100.68=neo。导致 ssh kenchoios@100.70.22.7 拿 neo 用户名打到 mini → tailscale ssh 拒"failed to look up local user kenchoios"。**真正错的不是 memory(本表全对),是我没用 memory**。
+
+**铁律: 跨机 ssh / scp / tailscale ping 任何带 100.x IP 的命令前,先 `tailscale status` 查一遍真名单或 grep 本表。** 元规则见 `feedback_用上你的记忆.md`。
 
 **Why:** 小旋风段 192.168.50.x 是局域网,跨机访问可走;但腾讯云端(暖树/景清)够不到局域网,长远必须走 Tailscale。Tailscale 100.x.x.x 是统一寻址层,以后 SSH/SMB/任何跨机协议优先用 100.x。
 
