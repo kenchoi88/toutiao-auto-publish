@@ -1461,3 +1461,40 @@ Nearest DERP: San Francisco 161.1ms (回到电信路径)
 签名:       阿良 (air, claude opus 4.7 1M context)
             协作: 绣虎 (台机) + 缺哥 (指挥)
 ============================================================
+
+
+============================================================
+追加 [2026-05-06 23:34]: 微头条自动启动定时
+============================================================
+
+缺哥指令: "写个微头条自动发布的脚本,明天 6 点准时 go,自动启动"
+现状摸清: ~/Desktop/微头条自动发布/{gtg_batch.py, go.command} 已存在
+         go.command 用 osascript 弹 Terminal + cd + python3 gtg_batch.py
+策略:    不重写脚本,复制现有 com.xiaoguan.article.plist 模板,改成 6:00 触发
+
+落地:    ~/Library/LaunchAgents/com.xiaoguan.wtt.plist (新建)
+          - StartCalendarInterval Hour=6 Minute=0
+          - 跑 ~/Desktop/微头条自动发布/go.command
+          - RunAtLoad=false (load 时不立即触发)
+          - launchd.log 写到 ~/Desktop/微头条自动发布/launchd.log
+         launchctl bootstrap gui/$UID 加载成功,state=not running 等触发
+
+下次触发: 2026-05-07 06:00:00
+
+注意事项:
+  - air 必须不睡眠 (launchd 在睡眠中不触发)
+  - 缺哥提前: "已准备好罐头,左侧标签,时间一到 go 即可"
+  - 看启动效果: tail -f ~/Desktop/微头条自动发布/launchd.log
+
+4 个定时 plist 全状态(air):
+  com.kenair.tailscale-watcher  Tailscale 切网软修轮询(常驻,30s 轮询)
+  com.xiaoguan.wtt              微头条 6:00 (今晚加,新)
+  com.xiaoguan.article          文章 7:01
+  com.xiaoguan.dataexport       数据导出
+  com.xiaoguan.datapull         数据拉取
+
+紧急关闭微头条定时:
+  launchctl bootout gui/$UID/com.xiaoguan.wtt
+
+============================================================
+
