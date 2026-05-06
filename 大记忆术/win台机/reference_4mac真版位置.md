@@ -9,15 +9,22 @@ originSessionId: 6198d8da-e501-4a0b-b8de-45446700703e
 
 之前这条写"air+mini=`文章定时自动发布/`、neo+neo2=`Mac文章定时自动发布/`(带 Mac 前缀)"是**错的**,缺哥早就改成 4 台同款了。SSH 实测全 4 台 = `~/Desktop/文章定时自动发布/`,无 Mac 前缀,无 ~/code 路径。
 
-## 速查 — 4 Mac 三大件真版位置(2026-05-03 实测)
+## 速查 — 4 Mac 三大件真版位置(2026-05-03 实测,2026-05-06 加口语映射)
 
-**4 Mac 同款,全在桌面**:
+**4 Mac 同款 + 台机同款,全在桌面**:
 
 ```
-~/Desktop/微头条自动发布/      gtg_batch.py + go.command
-~/Desktop/文章自动发布/        gtg_batch.py + go.command
-~/Desktop/文章定时自动发布/    gtg_timer.py + go.command + 定时发布.xlsx + 账号配置.xlsx
+缺哥口语                      → 实际目录 / 三大件 / 关键 xlsx
+─────────────────────────────────────────────────────────────────
+「微头条」/「头条」           → ~/Desktop/微头条自动发布/        gtg_batch.py
+「文章」/「新文章」           → ~/Desktop/文章自动发布/          gtg_batch.py
+「定时文章」/「文章定时」/    → ~/Desktop/文章定时自动发布/      gtg_timer.py
+「文章定时素材」                                                  + 定时发布.xlsx (B1=日期)
+                                                                  + 账号配置.xlsx
 ```
+
+**台机路径前缀**: 台机所有大件挂在 `C:\Users\kench\Desktop\台机专用自动发布\<大件>/`(就一层"台机专用自动发布"后续同结构)
+**4 Mac 路径前缀**: 4 Mac 直接 `~/Desktop/<大件>/`(无 Mac 前缀,无嵌套)
 
 每个大件下还有:
 - `素材/` — 待发 docx 池
