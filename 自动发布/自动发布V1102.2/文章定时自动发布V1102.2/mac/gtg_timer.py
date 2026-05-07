@@ -67,6 +67,12 @@ ALERT_THRESHOLD = 5000
 ALERT_FILE = None  # 在 _init_run_dir 里赋值
 LOG_FILE       = None
 FAIL_FILE      = None
+# [v1102 NOTICE 重建] timer.py 补
+NOTICE_FILE         = None  # 系统通知.txt
+NOTICE_CHECKED_FILE = None  # notice_checked.txt 持久化已检查账号
+LAST_PUBLISHED_FILE = None  # [v1102] 持久化最近 publish 成功账号
+VIOLATION_FILE      = None  # 违规提醒.txt
+notice_checked_set  = set()  # 全局: 当天已检查 NOTICE 账号
 
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 # ================================================
@@ -78,7 +84,7 @@ VIOLATION_KEYWORDS = {
 
 
 def _init_run_dir():
-    global LOG_FILE, FAIL_FILE, RUN_REPORT_DIR
+    global LOG_FILE, FAIL_FILE, RUN_REPORT_DIR, NOTICE_FILE, NOTICE_CHECKED_FILE, LAST_PUBLISHED_FILE, VIOLATION_FILE
     ts = datetime.now().strftime("%Y%m%d")
     RUN_REPORT_DIR = os.path.join(BASE_DIR, "运行报告", ts)
     os.makedirs(RUN_REPORT_DIR, exist_ok=True)
@@ -86,6 +92,10 @@ def _init_run_dir():
     FAIL_FILE = os.path.join(RUN_REPORT_DIR, "失败记录.xlsx")
     global ALERT_FILE
     ALERT_FILE = os.path.join(RUN_REPORT_DIR, "高阅读量提醒.txt")
+    NOTICE_FILE         = os.path.join(RUN_REPORT_DIR, "系统通知.txt")
+    NOTICE_CHECKED_FILE = os.path.join(RUN_REPORT_DIR, "notice_checked.txt")
+    LAST_PUBLISHED_FILE = os.path.join(RUN_REPORT_DIR, "last_published.txt")
+    VIOLATION_FILE      = os.path.join(RUN_REPORT_DIR, "违规提醒.txt")
 
 
 def log(msg):
@@ -833,6 +843,7 @@ def detect_account_error(wsc):
         "失登": ["请登录", "登录已失效", "账号已下线", "重新登录"],
         "封号": ["账号已被封禁", "账号异常", "账号被封"],
         "禁言": ["账号被禁言", "发言受限", "无法发布"],
+        "限流": ["操作频繁", "请稍后再试"],
     }.items():
         for kw in keywords:
             if kw in page_text:
@@ -939,8 +950,169 @@ def close_current_tab(main_ws):
 
 # ========== 发布流程（定时发布版） ==========
 
+def check_system_notice(ws_url, account_name):
+    """
+    [v1102] 导航到消息中心 → 点击 系统通知 + 审核通知 频道
+    → 读取 2 天内(今天+昨天)的完整消息原文写入 NOTICE_FILE
+    新 selector: .conversation-box.notify-im-user-item (替代旧 span.name)
+    新提取: body.innerText 按日期行切分(MM-DD HH:MM / YYYY-MM-DD / 昨日/今日 HH:MM)
+    """
+    try:
+        today = datetime.now()
+        yesterday = today - timedelta(days=1)
+        today_short     = today.strftime("%m-%d")
+        yesterday_short = yesterday.strftime("%m-%d")
+        today_full      = today.strftime("%Y-%m-%d")
+        yesterday_full  = yesterday.strftime("%Y-%m-%d")
+
+        wsc = ws_connect(ws_url, timeout=8)
+        js(wsc, "location.href='https://mp.toutiao.com/profile_v4/personal/message?type=message_letter'", 300)
+        wsc.close()
+        time.sleep(3)
+
+        wsc = ws_connect(ws_url, timeout=8)
+        time.sleep(2.5)
+        notices = []
+
+        for channel in ["系统通知", "审核通知"]:
+            channel_json = channel.replace('"', '\\"')
+            clicked = js(wsc, f"""
+            (function(){{
+                var items = document.querySelectorAll('.conversation-box.notify-im-user-item');
+                for(var i=0; i<items.length; i++){{
+                    var t = (items[i].innerText || '').trim();
+                    if(t.indexOf("{channel_json}") === 0){{
+                        items[i].click();
+                        return 'ok';
+                    }}
+                }}
+                return null;
+            }})()
+            """, 301)
+
+            if not clicked:
+                log(f"  未找到频道: {channel}")
+                continue
+
+            time.sleep(2.5)
+
+            result = js(wsc, f"""
+            (function() {{
+                var todayShort = "{today_short}";
+                var yesterdayShort = "{yesterday_short}";
+                var todayFull = "{today_full}";
+                var yesterdayFull = "{yesterday_full}";
+                var lines = (document.body.innerText || '').split(/\\r?\\n/);
+                var results = [];
+                var current = '';
+                var currentDate = '';
+                var inWindow = false;
+                function dateInfo(line) {{
+                    var m = line.match(/^(\\d{{2}}-\\d{{2}})\\s+\\d{{2}}:\\d{{2}}$/);
+                    if (m) return m[1] === todayShort || m[1] === yesterdayShort;
+                    m = line.match(/^(\\d{{4}}-\\d{{2}}-\\d{{2}})\\s+\\d{{2}}:\\d{{2}}$/);
+                    if (m) return m[1] === todayFull || m[1] === yesterdayFull;
+                    if (/^昨日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    if (/^今日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    if (/^\\d{{2}}-\\d{{2}}\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return null;
+                    return null;
+                }}
+                function isDateLine(line) {{
+                    return /^(\\d{{2}}-\\d{{2}}|\\d{{4}}-\\d{{2}}-\\d{{2}}|昨日|今日)\\s+\\d{{2}}:\\d{{2}}$/.test(line);
+                }}
+                for (var i = 0; i < lines.length; i++) {{
+                    var line = lines[i].trim();
+                    if (!line) continue;
+                    if (isDateLine(line)) {{
+                        if (inWindow && current.trim()) {{
+                            results.push(currentDate + '\\n' + current.trim());
+                        }}
+                        currentDate = line;
+                        current = '';
+                        inWindow = (dateInfo(line) === true);
+                    }} else if (inWindow) {{
+                        current += line + '\\n';
+                    }}
+                }}
+                if (inWindow && current.trim()) {{
+                    results.push(currentDate + '\\n' + current.trim());
+                }}
+                // 去重(预览和详情可能重复)
+                var seen = {{}};
+                var dedup = [];
+                for (var k = 0; k < results.length; k++) {{
+                    var key = results[k].substring(0, 80);
+                    if (!seen[key]) {{ seen[key] = true; dedup.push(results[k]); }}
+                }}
+                return JSON.stringify(dedup);
+            }})()
+            """, 302)
+
+            if result:
+                try:
+                    msgs = json.loads(result)
+                    for msg in msgs:
+                        notices.append(f"【{channel}】\n{msg}")
+                except:
+                    pass
+
+        wsc.close()
+
+        violation_count = 0
+        if notices:
+            ts_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            # 分析违规类通知
+            violations = []
+            for n in notices:
+                for cat, kws in VIOLATION_KEYWORDS.items():
+                    for kw in kws:
+                        if kw in n:
+                            violations.append((cat, n))
+                            break
+            # 写系统通知 — 完整内容,不截断
+            content_str = f"\n[{ts_str}] 账号 {account_name} 2 天内通知 ({len(notices)} 条):\n"
+            for n in notices:
+                content_str += f"\n--- 通知 ---\n{n}\n"
+            content_str += "\n" + "=" * 60 + "\n"
+            with open(NOTICE_FILE, "a", encoding="utf-8") as f:
+                f.write(content_str)
+            log(f"  ⚠ 2 天内通知 {len(notices)} 条 → 系统通知.txt")
+            # 写违规提醒
+            if violations:
+                vcontent = f"[{ts_str}] 账号 {account_name} 违规/扣分提醒:\n"
+                for cat, msg in violations:
+                    vcontent += f"  [{cat}] {msg[:300]}...\n"
+                vcontent += "\n"
+                with open(VIOLATION_FILE, "a", encoding="utf-8") as f:
+                    f.write(vcontent)
+                violation_count = len(violations)
+                log(f"  ⚠ 违规/扣分 {violation_count} 条 → 违规提醒.txt")
+        else:
+            log("  系统/审核通知: 2 天内无新通知")
+        return len(notices), violation_count
+    except Exception as e:
+        log(f"  系统通知检测出错: {e}")
+        return 0, 0
+
+def _check_notice_once(ws_url, account_name):
+    """[v1102] publish 调用前 wrapper: 当天读 1 次 NOTICE,持久化 set"""
+    global notice_checked_set
+    if account_name in notice_checked_set:
+        log(f"  系统/审核通知:{account_name} 当天已读过,跳过")
+        return
+    check_system_notice(ws_url, account_name)
+    notice_checked_set.add(account_name)
+    try:
+        with open(NOTICE_CHECKED_FILE, "a", encoding="utf-8") as _ncf:
+            _ncf.write(f"{account_name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except Exception as _e:
+        log(f"  [v1102] 写 notice_checked.txt 失败: {_e}")
+
+
 def publish_article_timer(ws_url, doc_path, main_ws, account_name, timer_time=None):
     """定时发布一篇文章，timer_time格式: YYYY-MM-DD HH:MM"""
+    # [v1102] publish 前检 NOTICE(每号当天 1 次,持久化)
+    _check_notice_once(ws_url, account_name)
     try:
         wsc = ws_connect(ws_url, timeout=10)
     except Exception as e:
@@ -1630,6 +1802,9 @@ end tell
             # 等"确认发布"按钮
             for i in range(60):
                 time.sleep(0.5)
+                if i == 10 and not confirm_clicked:
+                    log(f"  [V1102.3] 5s 未见确认发布,补点预览并发布 ({preview_x},{preview_y})")
+                    subprocess.run(["cliclick", f"c:{preview_x},{preview_y}"], capture_output=True)
                 v2 = js(wsc, """
                 (function(){
                     var btns = document.querySelectorAll('button');
@@ -2056,6 +2231,12 @@ end tell
 
     wsc.close()
     log(f"  OK 定时发布成功 → {timer_time}")
+    # [v1102] 持久化最近 publish 成功账号
+    try:
+        with open(LAST_PUBLISHED_FILE, "a", encoding="utf-8") as _lpf:
+            _lpf.write(f"{account_name}|{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except Exception as _e:
+        log(f"  [v1102] 写 last_published.txt 失败: {_e}")
     return True, "成功"
 
 
@@ -2327,9 +2508,23 @@ def run_death_grip_timer(
 
 def main():
     _init_run_dir()
+    # [v1102] 从 notice_checked.txt 恢复 notice_checked_set
+    global notice_checked_set
+    notice_checked_set = set()
+    if NOTICE_CHECKED_FILE and os.path.exists(NOTICE_CHECKED_FILE):
+        try:
+            with open(NOTICE_CHECKED_FILE, encoding='utf-8') as _ncf:
+                for _line in _ncf:
+                    _name = _line.strip().split('|')[0]
+                    if _name:
+                        notice_checked_set.add(_name)
+        except Exception as _e:
+            pass
     log("=" * 50)
     log("创作罐头图文文章定时发布 Mac版 启动")
     log(f"报告目录: {RUN_REPORT_DIR}")
+    if notice_checked_set:
+        log(f"  [v1102] 从 notice_checked.txt 恢复 {len(notice_checked_set)} 个已检查账号(中断恢复)")
     log("=" * 50)
 
     os.makedirs(DOCS_FOLDER, exist_ok=True)
@@ -2376,6 +2571,27 @@ def main():
         log("错误: 没有可发文账号")
         main_ws.close()
         return
+
+    # [v1102] 主线主控 v2:读 last_published.txt 拿最近 publish 账号 → 找 idx → 环形重排让下一位置首
+    _last_published_acc = None
+    if LAST_PUBLISHED_FILE and os.path.exists(LAST_PUBLISHED_FILE):
+        try:
+            with open(LAST_PUBLISHED_FILE, encoding='utf-8') as _lpf:
+                _lines = [_l.strip() for _l in _lpf if _l.strip()]
+                if _lines:
+                    _last_published_acc = _lines[-1].split('|')[0].strip()
+        except Exception as _e:
+            log(f"  [v1102] last_published.txt 读取失败: {_e}")
+    if _last_published_acc and all_accounts:
+        _last_idx = -1
+        for _i, _a in enumerate(all_accounts):
+            if _last_published_acc in _a or _a in _last_published_acc:
+                _last_idx = _i
+                break
+        if _last_idx >= 0:
+            _next = (_last_idx + 1) % len(all_accounts)
+            all_accounts = all_accounts[_next:] + all_accounts[:_next]
+            log(f"  [v1102] 中断处自动接续:最近 publish「{_last_published_acc}」(idx={_last_idx}) → 从下一位「{all_accounts[0]}」起跑")
 
     # 准备文档池(提前到 quota 算之前)
     doc_pool = list(get_docs())

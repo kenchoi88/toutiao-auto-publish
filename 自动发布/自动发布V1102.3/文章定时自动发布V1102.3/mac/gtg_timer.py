@@ -1014,6 +1014,7 @@ def check_system_notice(ws_url, account_name):
                     if (m) return m[1] === todayFull || m[1] === yesterdayFull;
                     if (/^昨日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
                     if (/^今日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    if (/^\\d{{2}}-\\d{{2}}\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return null;
                     return null;
                 }}
                 function isDateLine(line) {{
