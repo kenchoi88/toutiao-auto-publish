@@ -27,7 +27,7 @@
 - [MCN数据每日下载](project_MCN数据每日下载.md) — Win 台机桌面 MCN数据下载/,每天 Claude 接手跑下载.bat,xlsx 待用户从 air 拷
 - [角色代号](reference_角色代号.md) — 缺哥(用户)+ 5 本地机 + 云端:绣虎(Win/我)、阿良(air)、小齐+小师弟(neo)、左右(neo2 待建)、东山(mini,我分身)、暖树+景清(腾讯云端)
 - [SSH 用户名规律](reference_SSH用户名规律.md) — ⚠️ **neo SSH 用户名是 `kenchoios`(1 个 i,不是 kenchoiios!)**;5 机 ComputerName 已统一 KenChoi+机器名(2026-05-02)
-- [统一密码](reference_统一密码.md) — 5 台机 sudo / 登录共用一个密码,sudo -S 走 stdin 喂入,别写 argv
+- [台机/4 mac 密码](reference_统一密码.md) — ⚠ 台机 keneunice0816 (Win) ≠ 4 mac geng7997 (5/7 缺哥纠正之前错合并),sudo -S 走 stdin 别写 argv
 - ❗ [Tailscale 网络](reference_Tailscale网络.md) — kenchoi315@gmail.com tailnet;5 机 IP:台机100.86.79.39/mini100.70.22.7/neo100.68.57.96/neo2100.96.153.17/air100.126.82.58(2026-05-06 漂);**跨机命令前必先 grep 本表/`tailscale status`,别脑补 IP**(2026-05-06 推 246 抽风教训)
 - [Shadowrocket Tailscale bypass](reference_Shadowrocket_Tailscale_bypass.md) — 4 Mac 火箭必须放行 100.64.0.0/10,否则跨机 TCP 全挂(ICMP 通误导)
 - ❗ [4 Mac Shadowrocket 必须三层放行 100.64.0.0/10](feedback_shadowrocket_skip_proxy.md) — docid=2 skip-proxy + docid=3 tun-excluded + Rule 段三层缺一切 SSID 必踩(2026-05-06 mini+neo 实证补漏);切 SSID 时 fake-DNS 还劫 controlplane,daemon 用 plist HTTPS_PROXY=127.0.0.1:1082 自救;别用 tailscale ssh wrapper 还是 100.x 直连
