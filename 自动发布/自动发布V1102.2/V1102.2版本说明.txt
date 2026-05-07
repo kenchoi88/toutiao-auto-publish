@@ -450,6 +450,14 @@
     4. 频道切换 sleep 1.5s → 2.5s
     5. 双频道读:同时读"系统通知" + "审核通知"两个频道
 
+  ⚠ 事后判定(2026-05-07 左右审 V1102.3 揭穿):
+     V1102.2 当时落地范围仅 Win 台机 + 4 mac 微头条,
+     **mac 文章定时件 NOTICE 重建当时未落地**(grep def check_system_notice = 0 处),
+     直到 V1102.3 才一并补回(包含 check_system_notice 完整函数 150+ 行 +
+     NOTICE_CHECKED_FILE 全局 + 限流硬终止类别"操作频繁/请稍后再试").
+     V1102.2 隐含的"5 机 × 3 件全员落地"对 mac 文章定时件不成立.
+     详见 V1102.3 版本说明改动清单 (E) 段.
+
 【5.4 [v1102] NOTICE 持久化 — notice_checked.txt(2026-05-04)】
   全局变量:
     NOTICE_CHECKED_FILE = run_reports/<日期>/notice_checked.txt

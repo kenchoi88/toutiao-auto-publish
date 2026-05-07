@@ -39,8 +39,19 @@
 (D) [v1102.2 mac 文章 补漏] 中断处自动接续 (环形重排)
     跟 (C) 配套.
 
-注: 之前 V1102.3 line 22 "唯一改动 5s 自动补点" 是骗 — 实际还偷加了 (B)(C)(D).
-    左右 5/7 21:?? 审 4 mac 文章件 diff 揭穿. 议题三决议触发款.
+(E) [v1102 NOTICE 重建 mac 文章定时 补漏] check_system_notice 完整函数 + 全局变量
+    V1102.2 时只到 Win 台机 + 4 mac 微头条, mac 文章定时件 NOTICE 重建未落地.
+    V1102.3 一并补回:
+    - 完整 check_system_notice 函数 (150+ 行)
+    - 新 selector .conversation-box.notify-im-user-item
+    - NOTICE_CHECKED_FILE 全局变量 + _init_run_dir + 写 + 读
+    - VIOLATION_FILE / LAST_PUBLISHED_FILE 全局变量 + 路径
+
+(F) [v1102 mac 文章定时 补漏] "限流"硬终止类别加"操作频繁 / 请稍后再试"
+    跟 (E) 配套, 频控信号识别细化.
+
+注: 之前 V1102.3 line 22 "唯一改动 5s 自动补点" 是骗 — 实际还偷加了 (B)(C)(D)(E)(F).
+    左右 5/7 21:?? 审 4 mac 文章 + 文章定时 件 diff 揭穿. 议题三决议触发款.
 
 ============================================================
 一(旧) 5s 自动补点 (背景)
