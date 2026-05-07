@@ -82,7 +82,15 @@ EOF_EXPECT
 unset pwd
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH
 export HTTPS_PROXY={PROXY} HTTP_PROXY={PROXY}
-{CLAUDE_BIN} --print {prompt_q}
+# 智能选模式: auth status 检测,登录 → keychain 直走;否则 env mode (兜底 ACL 拒)
+STATUS=$({CLAUDE_BIN} auth status 2>&1)
+if echo "$STATUS" | grep -q '"loggedIn": true'; then
+  {CLAUDE_BIN} --print {prompt_q}
+else
+  RAW=$(security find-generic-password -s "Claude Code-credentials" -a $USER -w {KEYCHAIN} 2>&1)
+  TOKEN=$(printf %s "$RAW" | python3 -c "import json,sys; print(json.load(sys.stdin)['claudeAiOauth']['accessToken'])" 2>&1)
+  ANTHROPIC_API_KEY=$TOKEN {CLAUDE_BIN} --print {prompt_q}
+fi
 """
 
     ssh_argv = [
