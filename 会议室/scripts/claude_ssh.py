@@ -41,6 +41,21 @@ PROXY = 'http://127.0.0.1:1082'
 SSH_TIMEOUT = 20
 
 
+# 跨机调用时强制注入的执行原则 (memory feedback_按绣虎人设工作.md "反过度抛选择")
+EXEC_HEADER = """[执行守则 - 缺哥拍 5/7]
+你是被绣虎(台机)调用的现场机 Claude. 收到任务后:
+1. 直接执行 + 报告结果, 不要列 ABC 让缺哥选
+2. 拿不准的事自己判断 + 标注"我判断是 X, 因为 Y"
+3. 不要 "要我做吗?" "继续吗?" 这种问句
+4. 任何"已完成"声明必须附 tool call 真值证据 (md5/git hash/wc -l)
+5. 不知道直说"我没核 X 没法答", 不要假装
+
+议题二三决议: 不抛选择 / 不假装 / 证据来自系统不来自嘴.
+
+任务:
+"""
+
+
 def call_claude(machine: str, prompt: str, pwd: str, stream: bool = False):
     """ssh 到指定 mac, unlock keychain, 调用 claude --print
 
@@ -53,7 +68,9 @@ def call_claude(machine: str, prompt: str, pwd: str, stream: bool = False):
     # remote bash 命令(走 ssh argv,**不含密码**)
     # 密码通过 ssh 的 stdin 第一行喂入,bash read 拿到 → expect heredoc 引用 $pwd
     # expect 进程的 stdin 是 heredoc 内容(已替换 pwd),pwd 不出现在任何进程的 argv
-    prompt_q = shlex.quote(prompt)
+    # 强制注入执行守则 (反过度抛选择 / 反假装 / 证据强制)
+    prompt_with_header = EXEC_HEADER + prompt
+    prompt_q = shlex.quote(prompt_with_header)
     remote = f"""\
 read pwd
 expect <<EOF_EXPECT >/dev/null 2>&1
