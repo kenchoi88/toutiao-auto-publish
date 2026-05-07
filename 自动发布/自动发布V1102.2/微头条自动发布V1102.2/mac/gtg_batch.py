@@ -1175,6 +1175,7 @@ def check_system_notice(ws_url, account_name):
                     if (m) return m[1] === todayFull || m[1] === yesterdayFull;
                     if (/^昨日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
                     if (/^今日\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return true;
+                    if (/^\\d{{2}}-\\d{{2}}\\s+\\d{{2}}:\\d{{2}}$/.test(line)) return null;
                     return null;
                 }}
                 function isDateLine(line) {{
@@ -1777,41 +1778,14 @@ end tell
             return
         time.sleep(0.6)
 
-        # Step 1a+1b: 循环 keystroke Cmd+Shift+G,直到"前往文件夹"小框真出现
-        # 妈家网络下单次 keystroke 经常不唤出小框(罐头响应慢/焦点抖),改成循环重发
-        # 每次都重 activate 罐头并 set frontmost,免得焦点跑去别的应用
-        go_appeared = False
-        for retry in range(5):
-            subprocess.run(["osascript", "-e", '''
+        # Step 1: Cmd+Shift+G 开"前往文件夹" + 直接赋值 text field（绕过 clipboard）
+        r = subprocess.run(["osascript", "-e", f'''
 tell application "创作罐头" to activate
 delay 0.3
 tell application "System Events"
     tell process "创作罐头"
-        set frontmost to true
-        keystroke "g" using {command down, shift down}
-    end tell
-end tell
-'''], capture_output=True)
-            # 单次最多等 4 秒
-            for _ in range(20):
-                if go_to_folder_sheet_exists():
-                    go_appeared = True
-                    break
-                time.sleep(0.2)
-            if go_appeared:
-                if retry > 0:
-                    log(f"  前往文件夹 重试 {retry+1} 次后出现")
-                break
-            log(f"  Cmd+Shift+G 第{retry+1}次未唤出前往文件夹,重试")
-
-        direct_ok = False
-        direct_err = None
-        if go_appeared:
-            time.sleep(0.3)  # sheet 刚出现给一拍稳住
-            # Step 1c: 直接 set value of text field
-            r = subprocess.run(["osascript", "-e", f'''
-tell application "System Events"
-    tell process "创作罐头"
+        keystroke "g" using {{command down, shift down}}
+        delay 1.5
         try
             set target to text field 1 of sheet 1 of sheet 1 of window 1
             set value of target to "{safe_path}"
@@ -1828,13 +1802,10 @@ tell application "System Events"
     end tell
 end tell
 '''], capture_output=True, text=True, timeout=20)
-            direct_ok = "OK" in (r.stdout or "")
-            direct_err = (r.stdout or "").strip()[:80]
-        else:
-            direct_err = "前往文件夹 8s 未出现"
+        direct_ok = "OK" in (r.stdout or "")
 
         if not direct_ok:
-            log(f"  直接赋值失败({direct_err}),回退clipboard")
+            log(f"  直接赋值失败（{(r.stdout or '').strip()[:80]}），回退clipboard")
             subprocess.run(["osascript", "-e",
                 'tell application "System Events" to tell process "创作罐头" to key code 53'],
                 capture_output=True)
@@ -1854,14 +1825,13 @@ end tell
                 click_dialog_button('cancel')
                 result_holder[0] = False
                 return
-            # 注意:Step 1a/1b 已经唤出"前往文件夹"小框,这里不再重发 Cmd+Shift+G
-            # (重发会把已开的小框关掉或弄错状态,导致后续 Cmd+A/V/回车打到错误位置 → Step 2 关不掉小框)
             subprocess.run(["osascript", "-e", '''
 tell application "创作罐头" to activate
-delay 0.2
+delay 0.3
 tell application "System Events"
     tell process "创作罐头"
-        set frontmost to true
+        keystroke "g" using {command down, shift down}
+        delay 1.5
         keystroke "a" using {command down}
         delay 0.4
         keystroke "v" using {command down}
