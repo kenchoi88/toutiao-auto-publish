@@ -50,7 +50,7 @@
         _nc, _vc = check_system_notice(...)
   详见 V1102.4 版本说明 line 1.3.
 
-  9 处 patch 范围 (台机文章定时本无 NOTICE, 不动):
+  10 处 patch 范围 (台机文章定时 gtg_timer.py 旧版无 NOTICE 不动; 但 gtg_batch.py 有 NOTICE 要改 — 5/7 左右第三回审揭穿绣虎漏改, 紧急补):
     台机 文章自动 (gtg_batch.py)
     air  文章自动 + 文章定时
     mini 文章自动 + 文章定时
