@@ -1,0 +1,28 @@
+故障说明 2026-05-09
+===================
+
+## 已修
+
+### V1102.5 微头条 gtg_batch.py 接续算法 bug (NEO2 实证 → V1102.6 修)
+
+**症状**:
+NEO2 微头条 19:32 手动重启后，日志显示 done_in_round 推算正确（"中断恢复:第 8 小轮第 87 账号断点 已发 772 篇"），但下一行立刻 "第 1 大循环 开始 (active 98 账号)" 全员从账号 1 重发，没有"中断处自动接续"log。结果之前已发的账号被重新发，缺哥要的"从断点续发"未生效。
+
+**根因**:
+V1102.5 mac gtg_batch.py 接续算法 (line 2596-2616 读 last_published.txt + 环形重排) 嵌套在 `if _wl_q:` 块内，只在路径 A (catchup.py 写白名单) 跑。手动重启 (路径 B) 不走 catchup → 白名单空 → 接续算法被跳过。
+
+另一关联问题: line 2665 `sub_rounds=5` 写死，quota=10 时只跑 5 小轮，漏后 5 小轮。
+
+**修法 (V1102.6, 两 patch)**:
+1. 接续算法移出 `if _wl_q:` 块，提到 try-except 外，无论是否有白名单都从 last_published 接续
+2. `sub_rounds` 改为 `max(quota_map.values()) if quota_map else 5`，动态等于 quota
+
+**实证 (NEO2 20:44 patch 后启动)**:
+日志出 `[v1102.6] 中断处自动接续:最近 publish「半生轻狂客」(idx=88) → 从下一位「吧啦啦熊样」起跑` ✅，按缺哥要的从断点续发。
+
+**影响范围 (待修)**:
+5 机其他 4 mac 微头条 gtg_batch.py + 5 机文章 gtg_batch.py + 5 机文章定时 gtg_timer.py 可能同款。
+
+## 未修
+
+(无)
