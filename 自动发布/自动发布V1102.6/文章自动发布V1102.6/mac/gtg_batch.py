@@ -2490,7 +2490,7 @@ def main():
     # 没有白名单独立配额 → 全局 = 总篇数 ÷ 账号数
     if not quota_map:
         quota = (len(docs) + sent_total) // len(accounts) if len(accounts) > 0 else 1  # [v1102] 加已发累计
-        quota = max(quota, 1)
+        quota = max(1, min(3, quota))  # [V1102.6 左右拍 2026-05-10] cap 3 (V1102.2 line 211 文章 3 篇/天硬上限)
         quota_map = {a: quota for a in accounts}
         log(f"本次发布: {len(accounts)} 个账号,{len(docs)} 篇文档,每账号配额 {quota} 篇")
     else:
