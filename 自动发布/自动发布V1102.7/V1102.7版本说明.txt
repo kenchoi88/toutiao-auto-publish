@@ -1,0 +1,78 @@
+V1102.7 版本说明 (左右 2026-05-11 拍板)
+========================================
+日期: 2026-05-11
+基线: V1102.6
+范围: 5 机 × 微头条 gtg_batch.py (mac 4 + win 1 = 5 件)
+不动: 文章自动 / 文章定时 / 文章定时 Stage 2
+
+## 一、需求
+
+发文时自动勾选「**作品声明:取材网络**」复选框 (头条号编辑器灰色小字标签)。
+
+**业务原因**: 平台 5/8 创作指引 (黑板报第六期) 「失实表述扣 10 分 — 使用 AI 生成的故事/新闻/配图但未向用户明示」。罐头爆款本就是 AI 洗稿, 不勾"取材网络" = 未标注 AI = 扣分。
+
+## 二、改动
+
+### 2.1 新增函数 `ensure_zuopin_shengming_checked(ws)`
+
+放在 `publish_article` 函数前 (mac line ~1389 / win line ~1397)。
+
+逻辑:
+1. JS 找 textContent 含「取材网络」+ 长度 < 20 的 label/span/div (防误命中长文本)
+2. 找对应 input[type=checkbox] (closest label / previousElementSibling / parentElement.querySelector)
+3. 已勾 → return 'already_checked'
+4. 未勾 → click + dispatchEvent('change') 兜底 → 等 0.4s → 回读校验
+5. 回读 cb.checked === true → 'verified_ok'
+6. 任何失败 → return False, log "★ ... 该篇硬保护跳过"
+
+### 2.2 调用插入
+
+`publish_article` 函数内, 头条首发处理后、`# 点"发布"` 注释前:
+
+```python
+# [V1102.7 左右拍 2026-05-11] 作品声明:取材网络 — 失败硬保护跳过该篇
+if not ensure_zuopin_shengming_checked(wsc):
+    wsc.close()
+    return False, "作品声明勾选失败"
+
+# 点"发布"
+```
+
+### 2.3 失败语义 (跟 V1101.3 头条首发硬保护同款风格)
+
+- 单篇硬保护跳过, **不进 HARD_TERMINATE_REASONS** (失败 reason 是 "作品声明勾选失败" 不在 set)
+- 该账号下次重试可能 DOM 加载好就过, 不永久放弃账号
+- 业务原因: 比扣 10 分更糟 = 直接不发
+
+## 三、归档 md5
+
+| 件 | md5 |
+|---|---|
+| mac gtg_batch.py (4 mac 同款) | **9abe9ee2908fe861523ceded2e994906** |
+| win gtg_batch.py (台机) | **76b03d6e4137aa1e34b18a910f3ebe2c** |
+
+## 四、5 机推送状态 (5/11)
+
+| 机 | 桌面 md5 | 备份 |
+|---|---|---|
+| NEO2 mac | 9abe9ee2908f | gtg_batch.py.bak_pre_v1102.7_20260511 |
+| AIR mac | 9abe9ee2908f | 同 |
+| MINI mac | 9abe9ee2908f | 同 |
+| NEO mac | 9abe9ee2908f | 同 |
+| 台机 win | 76b03d6e4137 | gtg_batch.py.bak_pre_v1102.7_20260511 (从 V1102.6 仓库归档恢复) |
+
+## 五、不动
+
+- ❌ 文章自动 gtg_batch.py / 文章定时 gtg_timer.py / 文章定时 gtg_batch.py — 不动
+- ❌ 当前在跑的 gtg_batch 进程不 kill — 等 GO 跑完, 下次启动新版生效
+- ❌ JS click 失败不上 cliclick 兜底 — form checkbox 不算反风控敏感
+- ❌ 失败 reason 不进 HARD_TERMINATE_REASONS — 单篇跳过不放弃账号
+
+## 六、关键标记 grep (左右审用)
+
+```bash
+grep "V1102.7 左右拍" gtg_batch.py    # 必须 2 处 (函数 def + 调用)
+grep "ensure_zuopin_shengming_checked" gtg_batch.py  # 必须 ≥ 2 处 (def + call)
+grep "作品声明勾选失败" gtg_batch.py   # 必须 1 处 (return reason)
+grep "取材网络" gtg_batch.py          # 必须 ≥ 4 处 (JS 匹配 + log 4 处)
+```
