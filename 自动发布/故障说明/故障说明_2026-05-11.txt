@@ -1,0 +1,39 @@
+故障说明 2026-05-11
+===================
+
+## 已修
+
+### V1102.7 微头条作品声明取材网络自动勾选 (5 机一次过)
+
+**背景:**
+平台 5/8 创作指引: AI 生成内容未标注 = 失实表述扣 10 分 / 篇.
+作品声明 = 防扣分关键, 必须发文时自动勾选.
+
+**修法:**
+publish_article 流程「头条首发处理后 / 点击发布前」插入 ensure_zuopin_shengming_checked():
+1. JS 找 textContent 含「取材网络」+ length<20 (防误命中长文本) 的 label/span/div
+2. 找父级或兄弟 input[type=checkbox]
+3. cb.click() + cb.dispatchEvent(new Event('change', {bubbles: true})) 兜底
+4. time.sleep(0.4) 后再 query 一次 cb.checked 回读校验 (React 受控组件需异步)
+5. 失败硬保护跳过该篇 — return False, "作品声明勾选失败"
+   - 跟 v1101.3 头条首发"应取消但仍勾着 → 硬保护"同款逻辑
+   - 不进 HARD_TERMINATE_REASONS — 单篇跳过, 不永久放弃账号
+   - 业务: 漏勾被扣 10 分 比 不发出去 更糟
+
+**5 机部署 (一次过 — 缺哥要求急):**
+| 机 | 桌面 md5 | 关键标记 (V1102.7=2 / 函数=2 / 取材网络=8) |
+|---|---|---|
+| 4 mac (air/mini/neo/neo2) | 9abe9ee2908fe861523ceded2e994906 (全等) | ✓ |
+| 台机 win | 76B03D6E4137AA1E34B18A910F3EBE2C (CRLF) | ✓ |
+
+仓库归档完整 (mac+win+版本说明齐, 没踩归档铁律) ✓
+hash 三连 0c25e435fe6d8c3369689dd36a79deb8a7ec0fda ✓ (绣虎遵守"声明已推必附 hash"纪律)
+
+**范围:**
+仅 5 机 × 微头条 gtg_batch.py = 5 件. 文章/文章定时件本期不动 (按缺哥拍).
+
+**生效:** 当前 GO 跑完后下次启动新版生效, 不 kill 进程.
+
+## 未修
+
+(无)
