@@ -57,12 +57,16 @@ V1102.6 接续算法移出 if 后, **重置规则升级**:
 ```
 ✅ Patch 1 接续算法生效 (跟 V1102.6 修正版逻辑一致, 5/10 已重推 cap 5 修正版)
 
-## 5 机 × 三件归档 md5 (V1102.6 修正版 — 5/10 全推)
+## 5 机 × 全件归档 md5 (V1102.6 修正版 — 5/10 全推)
 
-| 机 | 微头条 gtg_batch.py | 文章自动 gtg_batch.py | 文章定时 gtg_timer.py |
-|---|---|---|---|
-| **mac (4 台)** | 812e0479eadd... | 61123bb19221... | 04245d6b3fe3... (V1102.5 mac OK 不动) |
-| **台机 win** | fe540d0dab50... | eb69f264038... | daf1bb43e9e0... (V1102.5 win 已 cap 3 + 无接续, 待左右拍是否新加接续) |
+| 机 | 微头条 gtg_batch.py | 文章自动 gtg_batch.py | 文章定时 gtg_timer.py | 文章定时 gtg_batch.py (Stage 2) |
+|---|---|---|---|---|
+| **mac (4 台)** | 812e0479eadd... | 61123bb19221... | 04245d6b3fe3... (V1102.5 mac OK) | 不存在 (mac 文章定时只用 timer) |
+| **台机 win** | fe540d0dab50... | eb69f264038... | daf1bb43e9e0... (V1102.5 cap 3 + 无接续) | **1f5c13bb4034...** (V1102.6 patched - 接续移出 + cap 3) |
+
+**台机 win 文章定时件含 2 个 py**: gtg_timer.py (Stage 1 排程) + gtg_batch.py (Stage 2 死磕补尾)
+- gtg_timer.py V1102.5 已 cap 3, 无 last_published 接续机制 (mac 同款也无)
+- **gtg_batch.py V1102.6 同款 patch** (接续移出 if + cap 3) - 5/10 左右 hash 三连发现漏归档时新补
 
 仓库归档:
 - 自动发布V1102.6/微头条自动发布V1102.6/mac/gtg_batch.py
