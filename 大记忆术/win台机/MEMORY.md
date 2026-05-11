@@ -33,6 +33,10 @@
 - [SSH 用户名规律](reference_SSH用户名规律.md) — ⚠️ **neo SSH 用户名是 `kenchoios`(1 个 i,不是 kenchoiios!)**;5 机 ComputerName 已统一 KenChoi+机器名(2026-05-02)
 - [台机/4 mac 密码](reference_统一密码.md) — ⚠ 台机 keneunice0816 (Win) ≠ 4 mac geng7997 (5/7 缺哥纠正之前错合并),sudo -S 走 stdin 别写 argv
 - ❗ [Tailscale 网络](reference_Tailscale网络.md) — kenchoi315@gmail.com tailnet;5 机 IP:台机100.86.79.39/mini100.70.22.7/neo100.68.57.96/neo2100.96.153.17/air100.126.82.58(2026-05-06 漂);**跨机命令前必先 grep 本表/`tailscale status`,别脑补 IP**(2026-05-06 推 246 抽风教训)
+- ❗ [air offline 日均一次 - 三层兜底](reference_air_LAN_SSH兜底.md) — air 几乎天天 offline;① LAN IP(192.168.3.x)直连 → ② TSMP only/不在家:mini Bonjour `KenChoiair.local` 跳板 → ③ mini 无 air ssh key 走 expect+`geng7997`,5 机命名规律 `KenChoi<机器>.local`(2026-05-11)
+- ❗ [PS 中文乱码不要瞎猜目录名](feedback_PS中文乱码不要瞎猜目录名.md) — PowerShell GBK 输出中文乱码,反推目录名 = 赌博;查中文路径必须 `py -X utf8 -c "os.listdir(...)"`,且**用户指令措辞即路径名**(2026-05-11 把"运行报告"当形容词反推成"历史备份" glob 全 miss 被骂 3 次)
+- ❗ [跨机操作直接 scp + Python 脚本](feedback_跨机操作直接scp_python.md) — PS+ssh+zsh 三层嵌套引号转义经常踩 zsh nomatch / pipe 当命令错;跨机批操作直接 scp .py + python3 跑,不要塞 shell 命令进 ssh 引号(2026-05-11 清 .bak 试 4 次 ssh inline 都 fail,改 scp .py 一次过)
+- ❗ [清理/删除绝不擅自跨机](feedback_清理绝不擅自跨机.md) — 用户指 NEO 一个文件夹清,我擅自扩 4 mac×桌面+仓库 全清,删了 35 项不可恢复 .bak;**清理范围严格按用户指定,patch 可扩 删除不可扩**(2026-05-11)
 - [Shadowrocket Tailscale bypass](reference_Shadowrocket_Tailscale_bypass.md) — 4 Mac 火箭必须放行 100.64.0.0/10,否则跨机 TCP 全挂(ICMP 通误导)
 - ❗ [4 Mac Shadowrocket 必须三层放行 100.64.0.0/10](feedback_shadowrocket_skip_proxy.md) — docid=2 skip-proxy + docid=3 tun-excluded + Rule 段三层缺一切 SSID 必踩(2026-05-06 mini+neo 实证补漏);切 SSID 时 fake-DNS 还劫 controlplane,daemon 用 plist HTTPS_PROXY=127.0.0.1:1082 自救;别用 tailscale ssh wrapper 还是 100.x 直连
 - ❗ [Mac 切网必软修 + 三查清单](feedback_Mac出门归来三查清单.md) — 任何 SSID 切换(出门/回家/酒店/热点)路由 100.64 被新网关抢,跨机 TCP 全 fail;**切网第零步必做** `tailscale down && up` 软修(无副作用 ~7秒),然后三查;四网实证 q6/5G/4G/AX3 切回 100% 复现,包括切回家里也中招(2026-05-06 凌晨实战)
