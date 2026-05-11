@@ -34,6 +34,54 @@ hash 三连 0c25e435fe6d8c3369689dd36a79deb8a7ec0fda ✓ (绣虎遵守"声明已
 
 **生效:** 当前 GO 跑完后下次启动新版生效, 不 kill 进程.
 
+
+### 微头条每号上限 5 篇 → 10 篇 (5 机全量, 阿良改)
+
+**背景**:
+gtg_batch.py V1102.6 (2026-05-10 mac 左右拍) 在 line 2704 写死硬 cap:
+  `quota = max(1, min(5, quota))  # cap 5`
+注释引用 "V1102.2 line 211 微头条 5 篇/天硬上限".
+缺哥要求把全机 5 改成 10.
+
+**实施 (2026-05-11 凌晨)**:
+sed/perl 原地改 5 → 10, 三处:
+1. `min(5, quota)` → `min(10, quota)`     (硬 cap)
+2. `sub_rounds=5,` (调用处+默认参数)      → `sub_rounds=10,`
+3. 注释 `cap 5` / `微头条 5,文章/定时 3` / `微头条 5 小轮` → 全部 10
+
+**各机改完核对**:
+
+| 机 | 路径 | 关键行 | 状态 |
+|---|---|---|---|
+| air | ~/Desktop/微头条自动发布/gtg_batch.py | 2273 sub_rounds=10 / 2704 min(10,quota) cap 10 / 2729 sub_rounds=10 | ✅ |
+| mini | 同 (远端) | 2273/2704/2729 同 air | ✅ |
+| neo  | 同 (远端) | 2273/2704/2729 同 air | ✅ |
+| neo2 | 同 (远端) | 2273/2704/2729 同 air | ✅ |
+| 台机 | ~/Desktop/台机专用自动发布/微头条自动发布/gtg_batch.py | 2076 + 2519 sub_rounds=10 (无 cap 逻辑) | ✅ |
+
+**台机版本差异**:
+台机是 V1102.7 (5-11 比 mac V1102.6 新), 无 `min(5, quota)` 硬 cap 段.
+台机每号 quota 走白名单 Excel A/B 列 (`_read_whitelist_with_quota`), 本来就不被代码硬限 5.
+台机只需改 sub_rounds 两处 + 注释一处.
+
+**备份**:
+各机原文件留在原目录:
+  `gtg_batch.py.bak.pre_5to10_20260511_<HHMMSS>`
+
+**回滚命令** (任一机):
+```bash
+cd ~/Desktop/微头条自动发布
+mv gtg_batch.py.bak.pre_5to10_<时间戳> gtg_batch.py
+```
+
+**注意事项**:
+- 实际效果取决于素材池: quota = (素材数 + 已发累计) // 账号数, 然后被 min(10, ..) cap
+- 若每账号素材实际只够 7 篇, quota=7 不动 (cap 10 不触发)
+- 推过去三机 mini/neo/neo2 各 800 docx (合计 2384 docx) 已落地素材库, 当前素材池支持每账号 8 篇左右 (800/约100 账号)
+
+——阿良 (air) 留
+
+
 ## 未修
 
 (无)
