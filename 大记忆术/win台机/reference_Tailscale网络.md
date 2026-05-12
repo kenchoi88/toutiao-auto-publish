@@ -6,11 +6,17 @@ originSessionId: f99b6b5b-4ea0-48d9-baf7-b1b507d56ce3
 ---
 **Tailnet:** `kenchoi315@gmail.com`(同 Google 账号登录)
 
+**ACL ssh action = `accept`(2026-05-13 改,5 机互 SSH 免浏览器授权)**
+- 默认 `check` 模式每个新 src→dst 12h 内首次都要浏览器开 https://login.tailscale.com/a/... 授权,4 mac 就是 4 次,缺哥要的是「永久免」
+- 控制台 ACL `ssh` 段:`{"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot", "root"]}` — 只允许同 tailnet 自己人(就缺哥一人)互通,外人 SSH 不进来
+- 以后**新加机/重置 tailnet/重写 ACL** 务必保持 `accept`,改回 `check` 又要点链接;air 那条「首次需浏览器一次性审批」备注已过时
+
+
 | 机器 / 角色 | Tailscale hostname | Tailscale IP | 备注(2026-04-27) |
 |---|---|---|---|
 | Win 台机 / 绣虎 | `ken-choi` | 100.86.79.39 | 在线 |
 | mini / 东山 | `mini` | 100.70.22.7 | 2026-04-28 force-reauth(阿良瞎搞 Shadowrocket 把 mini 弄掉线 → 重新授权 NodeKey + 新 IP) |
-| air / 阿良 | `air` | **100.126.82.58 (2026-05-06 现状,旧 100.67.252.1 已漂)** | 2026-04-27 brew CLI 重装(LaunchDaemon 持久化);旧节点 `kenmacbook-air` 100.102.128.15 = GUI 版僵尸,admin console 删除;**2026-05-01 16:09 实测 idle 在线 + SSH 通**(走 Tailscale SSH,首次需浏览器一次性审批 https://login.tailscale.com/a/...);2026-05-05~06 五小时 Tailscale 故障会话后 IP 漂到 100.126.82.58 |
+| air / 阿良 | `air` | **100.126.82.58 (2026-05-06 现状,旧 100.67.252.1 已漂)** | 2026-04-27 brew CLI 重装(LaunchDaemon 持久化);旧节点 `kenmacbook-air` 100.102.128.15 = GUI 版僵尸,admin console 删除;**2026-05-01 16:09 实测 idle 在线 + SSH 通**;2026-05-05~06 五小时 Tailscale 故障会话后 IP 漂到 100.126.82.58 |
 | neo2 / 左右 | `neo2` | 100.96.153.17 | 2026-04-27 17:50 上线 |
 | neo / 小齐+小师弟 | `neo` | 100.68.57.96 | 2026-04-27 18:25 上线;2026-04-28 21:40 admin rename `mac` → `neo`(关 Auto-generate + 手填),根因是该机 macOS HostName=mac,要彻底要 `sudo scutil --set HostName/LocalHostName/ComputerName neo` + 重启 Tailscale daemon |
 
