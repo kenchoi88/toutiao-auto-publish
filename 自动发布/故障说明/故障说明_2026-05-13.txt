@@ -1,0 +1,63 @@
+============================================================
+2026-05-13 故障说明
+============================================================
+
+【未修】
+  (空)
+
+【已修】
+
+  故障 1 — 罐头 v1.7.11 升级导致 ACCOUNT_CLASS 失配 + collect_accounts 卡 5 分钟
+  ─────────────────────────────────────────────────────────────────
+  现象:
+    - 17:20 / 17:55 / 17:57 多次启动微头条件,log 卡 5 分钟后报"共收集到 0 个账号"
+    - 罐头侧栏明显看得到 5 个号(补发场景),但脚本拿不到
+    - 文章自动 / 文章定时件同款问题(尚未触发)
+
+  根因 A — ACCOUNT_CLASS hash 失配:
+    - 脚本写死 ACCOUNT_CLASS = "account-RALrbJ"(早上 04:18 / 05:29 时罐头给的 hash)
+    - 罐头 v1.7.11 给账号头像的 className 变成了 "account-cBAwuL"
+    - CDP probe 确认:document.querySelectorAll('.account-RALrbJ').length=0,实际是 .account-cBAwuL
+
+  根因 B — collect_accounts break 逻辑死锁:
+    - 旧代码 has_scrolled gating + same_count >= 4 才 break
+    - 补发场景账号 ≤ 20 个一屏装下,scrollTop += 200 滚不动,has_scrolled 永远 False
+    - for 跑满 1000 次 = 300 秒 后才退出循环,最后报 0 个
+
+  修法 (3 件同款):
+    A: ACCOUNT_CLASS = "account-",selector 改 [class^="account-"] 前缀模糊匹配,抗罐头每次 hash 变化
+    B: collect_accounts break 简化为 if before_top == after_top: break(删 has_scrolled / same_count)
+       - 少账号一屏装下:第一轮即 before==after → 退,把已抓到的全交出去发文
+       - 多账号 > 20:边滚边累加,滚到底 before==after 再退,已收集全部
+
+  实测:
+    - 微头条件 17:57 重跑后秒出 5 个账号(具体细节看 18:01 之后正常发文)
+
+  -----
+
+  故障 2 — 「一笑酒暖花深」账号 webview zoom 90% 导致鼠标点位偏移
+  ─────────────────────────────────────────────────────────────────
+  现象:
+    - 同批发文,其他号「文档导入」cliclick 1 秒到位,这号 3 次重试都点不到,32 秒/次超时后跳过
+    - log 显示其他号文档导入坐标 (816,593),这号 (1000,593),X 偏右 184 像素
+    - 罐头 v1.7.11 给「一笑酒暖花深」发文 webview 设了 zoomFactor 0.9
+
+  根因:
+    - CDP probe:main_ws.devicePixelRatio=1.25,但 pub_ws.devicePixelRatio=1.125
+    - 1.125 / 1.25 = 0.9 → 发文 webview 缩放 90%
+    - 脚本算法:import_x = main_ws_webview.sx + pub_ws_btn.cssX (两个不同 DPR 度量直接相加,错位)
+    - 真按钮物理屏幕位置 ~(1152, 679),Python DPI-unaware SetCursorPos(1000, 593) → 物理 (1250, 741)
+    - 光标落在按钮右下方 ~70 像素外(用户照片证实)
+    - Ctrl+0 重置 zoom 无效,罐头不让用户改这号的发文 webview zoom
+
+  修法 (3 件同款):
+    顶部加常量 ZOOM_FIX_ACCOUNTS = {"一笑酒暖花深"}
+    publish_article 算 zoom_ratio = 0.9 if name in ZOOM_FIX_ACCOUNTS else 1.0
+    4 处坐标算法(文档导入主调 + 拉回重读 + 重试重读 + 选择文档)全部乘 zoom_ratio
+    其他号 zoom_ratio = 1.0,公式退化为原代码,零影响
+    以后再发现哪个号同毛病,在 set 加一行
+
+  实测:
+    - 待重跑发文,跑到「一笑酒暖花深」时 log 应输出 [zoom_ratio=0.9],且 cliclick 点中按钮
+    - 文章自动 / 文章定时件 ZOOM_FIX 同款 patch,实测待用户跑
+============================================================
