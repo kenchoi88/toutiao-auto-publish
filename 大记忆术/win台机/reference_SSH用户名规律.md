@@ -10,13 +10,18 @@ originSessionId: f99b6b5b-4ea0-48d9-baf7-b1b507d56ce3
 
 ## 5 机权威表(2026-05-02 更新)
 
-| 机器 | 角色 | SSH 用户名 | LAN IP(电信 AX3) | Tailscale IP | **ComputerName**(UC/Bonjour 显示名) |
-|---|---|---|---|---|---|
-| Win 台机 | 绣虎(我) | `kench` | — | 100.86.79.39 | `ken-choi`(未改) |
-| neo2 | 左右 | `kenchoineo2` | 192.168.3.6 | 100.96.153.17 | **`KenChoineo2`** ✅ 2026-05-02 |
-| neo | 小齐+小师弟 | **`kenchoios`** ⚠️ 1 个 i! | 192.168.3.5 | 100.68.57.96 | **`KenChoineo`** ✅ 2026-05-02 |
-| mini | 东山 | `kenchoimini` | 192.168.3.8 | 100.70.22.7 | **`KenChoimini`** ✅ 2026-05-02 |
-| air | 阿良 | **`kenair`** ⚠️ 简化 | — | 100.67.252.1 | **`KenChoiair`** ✅ 2026-05-02 |
+| 机器 | 角色 | SSH 用户名 | **SSH 端口** | LAN IP(电信 AX3) | Tailscale IP | **ComputerName**(UC/Bonjour 显示名) |
+|---|---|---|---|---|---|---|
+| Win 台机 | 绣虎(我) | `kench` | **`2222`** ⚠️ 非默认 | — | 100.86.79.39 | `ken-choi`(未改) |
+| neo2 | 左右 | `kenchoineo2` | 22 | 192.168.3.6 | 100.96.153.17 | **`KenChoineo2`** ✅ 2026-05-02 |
+| neo | 小齐+小师弟 | **`kenchoios`** ⚠️ 1 个 i! | 22 | 192.168.3.5 | 100.68.57.96 | **`KenChoineo`** ✅ 2026-05-02 |
+| mini | 东山 | `kenchoimini` | 22 | 192.168.3.8 | 100.70.22.7 | **`KenChoimini`** ✅ 2026-05-02 |
+| air | 阿良 | **`kenair`** ⚠️ 简化 | 22 | — | 100.67.252.1 | **`KenChoiair`** ✅ 2026-05-02 |
+
+⚠️ **台机 sshd 监听 2222 端口**(2026-05-09 实证):
+- 4 mac → 台机: `ssh -p 2222 kench@100.86.79.39`
+- 不带 `-p 2222` 会 timeout(默认 22 上无监听)
+- 防火墙规则名「SSH 2222」实证 + `Get-NetTCPConnection -State Listen` 看到 sshd 进程监听 0.0.0.0:2222
 
 ## ⚠️ 铁则:SSH 用户名 ≠ ComputerName,别再搞混
 
