@@ -35,10 +35,25 @@ originSessionId: 6198d8da-e501-4a0b-b8de-45446700703e
 
 ## SSH 用户名(参 [reference_SSH用户名规律.md])
 
-- air `kenair@100.67.252.1`
+- air `kenair@100.126.82.58`(2026-05-06 漂自旧 100.67.252.1)
 - neo `kenchoios@100.68.57.96`(1 个 i ⚠️)
 - neo2 `kenchoineo2@100.96.153.17`
 - mini `kenchoimini@100.70.22.7`
+
+## ⚠️ 写死路径全集 — 5 机 × 三大件 素材目录(2026-05-13 缺哥拍,不再问路径)
+
+| 机 | 自动头条(微头条) 素材 | 自动文章(文章) 素材 | 定时文章 素材 |
+|---|---|---|---|
+| **台机** | `C:\Users\kench\Desktop\台机专用自动发布\微头条自动发布\素材\` | `C:\Users\kench\Desktop\台机专用自动发布\文章自动发布\素材\` | `C:\Users\kench\Desktop\台机专用自动发布\文章定时自动发布\素材\` |
+| **air** | `/Users/kenair/Desktop/微头条自动发布/素材/` | `/Users/kenair/Desktop/文章自动发布/素材/` | `/Users/kenair/Desktop/文章定时自动发布/素材/` |
+| **neo** | `/Users/kenchoios/Desktop/微头条自动发布/素材/` | `/Users/kenchoios/Desktop/文章自动发布/素材/` | `/Users/kenchoios/Desktop/文章定时自动发布/素材/` |
+| **neo2** | `/Users/kenchoineo2/Desktop/微头条自动发布/素材/` | `/Users/kenchoineo2/Desktop/文章自动发布/素材/` | `/Users/kenchoineo2/Desktop/文章定时自动发布/素材/` |
+| **mini** | `/Users/kenchoimini/Desktop/微头条自动发布/素材/` | `/Users/kenchoimini/Desktop/文章自动发布/素材/` | `/Users/kenchoimini/Desktop/文章定时自动发布/素材/` |
+
+- 4 mac 用 ssh 时 `~` 自动展开成 `/Users/<用户>/`,Bash inline 单引号 `'ls ~/Desktop/...'` OK
+- 子结构(每件素材目录下):`<docx 直接放>` + `已发送/`(历史归档) + `临时/`(发文中中转,通常空)
+- 查"在不在发文" 看 `<件目录>/素材/*.docx` 直接的数(不含 子目录),不是 `已发送/`
+- 查实际跑哪个件用 `lsof -p <pid> | grep cwd`,**进程名 gtg_batch.py / gtg_timer.py 不代表件**:文章定时件唯一脚本是 `gtg_timer.py`,微头条/文章自动用 `gtg_batch.py`
 
 ## 关键 xlsx(文章定时)
 
