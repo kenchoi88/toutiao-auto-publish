@@ -6,6 +6,8 @@ originSessionId: f99b6b5b-4ea0-48d9-baf7-b1b507d56ce3
 ---
 **Tailnet:** `kenchoi315@gmail.com`(同 Google 账号登录)
 
+⚠️ **TS 客户端易失登(2026-05-14 缺哥拍)** — 节点经常需要缺哥手动重新登录(可能 token 过期 / IdP 重新认证 / 客户端 bug)。表现:`tailscale status` 看不全 5 机,或某机 logged out。**跨机前必先 `tailscale status` 实地确认**,看到全员在线了再 ssh,别拿"上次通过"当依据。看到缺哥说"我先登了 TS"= 他刚手动救场,不是 TS 自己稳。
+
 **ACL ssh action = `accept`(2026-05-13 改,5 机互 SSH 免浏览器授权)**
 - 默认 `check` 模式每个新 src→dst 12h 内首次都要浏览器开 https://login.tailscale.com/a/... 授权,4 mac 就是 4 次,缺哥要的是「永久免」
 - 控制台 ACL `ssh` 段:`{"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot", "root"]}` — 只允许同 tailnet 自己人(就缺哥一人)互通,外人 SSH 不进来
