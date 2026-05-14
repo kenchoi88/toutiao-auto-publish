@@ -1,0 +1,62 @@
+============================================================
+2026-05-14 故障说明
+============================================================
+
+【未修】
+
+  故障 1 — 微头条件 check_system_notice 抓全页 body.innerText 导致左侧 5 频道预览全卷入 + 双频道合并写一文件
+  ─────────────────────────────────────────────────────────────────
+  影响范围: 仅微头条件(文章自动 / 文章定时件不调 check_system_notice,不受影响)
+
+  现象:
+    - 5 机 5/14 运行报告/20260514/ 目录都没有独立「审核通知.txt」文件,只有「系统通知.txt」一只
+    - MINI 系统通知.txt 132 条里,【系统通知】105 条 + 【审核通知】27 条,合并到同一文件
+    - 系统通知.txt 头 50 行全是「作者成长助手」周报内容("🌈XXX,过去一周,你的活跃..."),却被错挂【系统通知】或【审核通知】标签
+    - 缺哥实拍头条号"番茄爱吹东风"截图:左侧选「作者成长助手」05-13 13:59 周报,右侧主区域同条周报正文 — 而系统通知.txt 里这条被标记成【系统通知】,末尾还粘了下一项频道名"审核通知"
+    - 违规提醒.txt 132 条筛出 16 条命中(12.1%),数字虚高 — 真违规通知被周报噪音稀释
+
+  根因 A — 数据源抓全页:
+    - gtg_batch.py:1176  `var lines = (document.body.innerText || '').split(/\r?\n/);`
+    - body.innerText 把左侧 5 个频道项(系统通知/作者成长助手/活动通知/审核通知/微头条小秘书)的预览全卷进 lines
+    - 每个频道项 innerText 形如 "频道名\n05-13 13:59\n预览正文..."
+    - isDateLine 把左侧 "05-13 13:59" 也认成日期行 → 后一行的预览正文被切进 2 天窗口 → 贴上当前 click 的 channel 标签
+    - 末尾再粘下一个频道项的频道名字符串(如截图所示)
+
+  根因 B — 双频道合并写一文件:
+    - 1148 行 `for channel in ["系统通知", "审核通知"]:` 循环两个频道
+    - 1223-1224 行 notices.append(f"【{channel}】\n{msg}") 合并到同一 list
+    - 1244 行 with open(NOTICE_FILE, "a") 全量写 系统通知.txt(NOTICE_FILE)
+    - 缺哥之前定的需求是"点系统通知读右侧一面写系统通知.txt,点审核通知读右侧一面写审核通知.txt",历史上没落地
+
+  根因 C — 违规提醒.txt 的关键词体系跟头条实际用语错位:
+    - VIOLATION_KEYWORDS 12 个词里 5/14 实际命中只 3 个工作:违规(14)、扣分(1)、侵权(2)
+    - 其余 9 个(处罚/警告/禁言/发言受限/封禁/封号/原创违规/重复内容)5/14 全 0 命中
+    - 头条实际高频用语"信用分/不符合/事实不符/不适宜持续推荐/低质账号/专项治理"未覆盖
+    - 缺哥拍板:违规提醒.txt 整段功能砍掉,不再生成
+
+  实证 — CDP 实地 DOM 调研(台机 9223 端口,缺哥手动反复切换系统/审核通知 12 次):
+    - 右侧主消息容器真 selector = `div.chat-container.sys-msg-container > div.chat-container-list`(全页唯一)
+    - 子节点: `div.chat-row.time-stamp` 日期分隔行(text="01-21 20:02"/"昨日 14:27"/"今日 HH:MM")
+              `div.chat-row` 消息卡片(无 time-stamp class)
+              `div.notify-card > div.notify-card-row > p.notify-card-content` 正文
+    - 切系统通知 → chat-container-list 内日期序列 01-15/01-17/01-21/03-25/04-10/04-27
+    - 切审核通知 → chat-container-list 内日期序列 01-05/04-09/04-12/04-13/04-14/04-16
+    - 两边右侧内容完全不同,selector 锁定无误
+
+  修法草案 (待版本说明落定后开干):
+    1. 改 check_system_notice 数据源 — gtg_batch.py:1176 把 `document.body.innerText` 改成
+       `(document.querySelector('.chat-container-list') || {}).innerText || ''`
+    2. 拆双 TXT — 1146 notices 拆 sys_notices 和 audit_notices 两个 list;1244 处分别写
+       NOTICE_FILE("系统通知.txt") 和新 AUDIT_FILE("审核通知.txt")
+    3. _init_run_dir 加 AUDIT_FILE = os.path.join(RUN_REPORT_DIR, "审核通知.txt")
+    4. 砍违规提醒.txt 整段 — 删 1230-1239 violations 关键词扫,删 1247-1255 写 VIOLATION_FILE
+       VIOLATION_KEYWORDS / VIOLATION_FILE 全局定义保留无害(或一并删)
+    5. notice_checked.txt 每账号当天 1 次跳过逻辑(2143-2152)沿用不动 — 这是原脚本既有正确模式
+    6. 2 天窗口(今天+昨天)沿用 — isDateLine / dateInfo 函数(1181-1192)不动
+    7. log 输出改:`⚠ 系统通知 N 条 → 系统通知.txt / 审核通知 M 条 → 审核通知.txt`
+
+  仅微头条件做,文章自动 / 文章定时件不动(它们没 check_system_notice 调用)。
+
+【已修】
+  (空)
+============================================================
