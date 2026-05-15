@@ -9,6 +9,7 @@
 - ❗ [中断恢复 catchup.py — 缺 N 补 N](project_catchup_中断恢复.md) — 三大件中断后 cd 件目录 → python3 catchup.py → go.command,3 步搞定;数据来源「待补漏」sheet 或 log;依赖 gtg_batch v1101.5+(2026-05-02)
 - ❗ [用上你的记忆 — 元规则](feedback_用上你的记忆.md) — 50+ 条已立,问题从不是规矩不够是不用;接任务第一动作 grep+Read 对照,出问题先反思旧规矩别立新条(2026-05-01 缺哥拍)
 - ❗ [程序网络慢/被代理绑架先查 env 三件套](feedback_程序被代理绑架先查env三件套.md) — 程序慢必查 HTTPS_PROXY/NO_PROXY/trust_env;Python requests 读 env 不读 Win 注册表;修法三层=清env+session.trust_env=False+proxies=None(2026-05-12 ds_creator 火山 API 实证)
+- ❗ [台机以太网漂 Q6 — PnPCap+NCSI+v2rayN 三层](reference_台机以太网漂Q6_PnPCap_NCSI_v2rayN.md) — Intel I219-V 出厂 PnPCap=0x10 缺 0x100 节电没禁→网卡间歇休眠→NCSI 探测 msftconnecttest 走 v2rayN proxy→IPv4 标"本地"→应用 fallback Q6→Tailscale 走 DERP;修法 PnPCap=0x110 + bypass NCSI/Tailscale 域名(2026-05-16)
 - ❗ [不许说粗口 — 中性表达](feedback_不说粗口.md) — 操/草泥马/你麻痹/麻痹/几把/卧槽/妈的等任何粗口禁用(含拼音谐音变体);缺哥可以骂,我不学,改"认错/收到/明白/抽风"等中性词(2026-05-06 第二次拍要立 memory)
 - ❗ [跳过 X 类不筛要管 v0,不只 Claude](feedback_跳过类要覆盖v0.md) — 缺哥说「今天 X 类不筛我自己来」要覆盖整条流水线(v0+Claude+用户);跑爆款下载前 patch 我的删法_v0.py 跳过该类规则,或下载完 diff 原始 vs 筛后回填(2026-05-08 国际 v0 删 211 篇被缺哥捉,刻意没提醒)
 - [发文上限与补漏规则](project_发文上限与补漏规则.md) — 微头条 5 篇/号、文章 & 定时文章 3 篇/号;漏 N 补 N、已达上限不动
