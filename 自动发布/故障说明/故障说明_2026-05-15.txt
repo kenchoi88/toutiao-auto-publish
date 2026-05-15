@@ -1,0 +1,104 @@
+============================================================
+2026-05-15 故障说明
+============================================================
+
+【未修】
+
+  (无)
+
+============================================================
+
+【已修】
+
+  故障 1 — V1102.9 mac 端归档错版,把 Win 版当 Mac 版推送 4 mac 导致全 X 异常 No module named 'win32gui'
+  ─────────────────────────────────────────────────────────────────
+  影响范围: 4 Mac × 微头条件 (mini/air/neo/neo2 全炸)
+
+  现象:
+    - 4 mac 双击 go.command 后 gtg_batch.py 跑不了一篇成功
+    - log 反复 "X 异常: No module named 'win32gui'" → "已关闭 tab" → 篇间等待 N 秒
+    - mini/air 实拍截图 publish_article 路径触发 win32 调用,但 mac 上 win32gui 模块不存在
+
+  根因:
+    - V1102.9 commit 995f8ed 同步归档 mac/ + win/ gtg_batch.py 时,
+      绣虎(我)误把 win 版(2592 行,含 import win32gui/win32con/win32api)拷贝到 mac/ 目录
+    - V1102.7 mac 真版用 cliclick 走真鼠标 (memory [feedback_真鼠标点击_勿换CDP] 红线),
+      win32api 是 Windows 专属冗余,Mac 上不存在该模块
+    - 验证: V1102.7 mac 版 win32 出现 0 / cliclick 出现 26
+            V1102.9 mac 错版 win32 出现 24 / cliclick 出现 3
+
+  修法 (2026-05-15 09:30~10:00):
+    1. 实证 V1102.8 commit message 明确写 "Mac 不动" + 自动发布V1102.8/ 归档目录无 mac/ 子目录
+       → 推断 mac 真版 = V1102.7 mac 没动过到 V1102.9 这次被错推
+    2. 拉 V1102.7 mac/gtg_batch.py 为本地底稿 (_v1102.9_mac_wip.py)
+    3. 对照 V1102.9 win 端,移植三改到 mac 底稿:
+       - 全局变量 AUDIT_FILE = None + VIOLATION_FILE 注释 "已砍"
+       - _init_run_dir global 加 AUDIT_FILE + 初始化 ".../审核通知.txt"
+       - check_system_notice 函数体整段替换 (chat-container-list 数据源 + 双 TXT 独立写入)
+       - 调用者 line 2336: nc, vc → _sys_n, _audit_n; total_notices += (sys + audit)
+    4. 4 mac 同款 scp + cp 覆盖 + py_compile 校验
+    5. 4 mac md5 一致 = 5d8773bdbfce7c002d55cd472f09fe62 (含后续两条修法)
+
+  落地版本: V1102.9 mac 端真版 (覆盖归档 自动发布V1102.9/微头条自动发布V1102.9/mac/gtg_batch.py)
+  落地时间: 2026-05-15 10:00
+  落地人: 绣虎 (Win 台机)
+
+
+  故障 2 — collect_accounts dedupe 仅按 textContent,未读角标导致同账号被算 2 次,4 mac 共有
+  ─────────────────────────────────────────────────────────────────
+  影响范围: 4 Mac × 微头条件 collect 阶段 (账号数虚高 2)
+
+  现象:
+    - air log 09:26:24 collect 122 / 10:03:10 collect 124 / 10:05:09 collect 124 摆动
+    - 缺哥肉眼数 air 真实账号 122,但脚本 collect 出 124,多 2 个
+    - 4 mac 全机出现"账号数 + 2"现象 (缺哥拍)
+
+  根因:
+    - collect_accounts 函数 (gtg_batch.py:692) 用 [class^="account-"] 选所有账号 entry
+    - dedupe key 用 textContent.trim()
+    - 罐头新版账号 entry 在有未读消息时 textContent 前置数字角标 (e.g. "2\n一笑酒暖花深")
+    - 同账号在 lazy render 不同时刻被 mount 时,有时带角标有时不带
+    - "2\n一笑酒暖花深" 跟 "一笑酒暖花深" 算 2 个独立 string,seen set 里独占
+    - 实证: 当下 dump air [class^="account-"] 所有 122 条全 className=account-cBAwuL 全无角标
+            2 个肇事账号 dump 时已读角标消失 → 干净 122
+
+  修法 (2026-05-15 12:00~):
+    - collect_accounts line 714 + 766 (兜底段) 取 textContent 后 strip 前导数字角标:
+      t = t.replace(/^\d+\s*/, "")
+    - 4 mac 推 md5 = 5d8773bdbfce7c002d55cd472f09fe62
+
+  落地版本: V1102.9 mac 端真版 (含本修)
+  落地时间: 2026-05-15 12:30
+
+
+  故障 3 — quota cap 写死 5 + xlsx 白名单 quota 默认 1,卡住缺哥要发更多场景
+  ─────────────────────────────────────────────────────────────────
+  影响范围: 4 Mac + Win 台机 × 微头条件 (限制每号最多 5 篇)
+
+  现象:
+    - 缺哥要每号发 8 篇 (素材 8 篇/号),脚本只发 5 篇即停
+    - log 显示 "本次发布: 122 个账号,X 篇文档,每账号配额 5 篇"
+
+  根因:
+    - V1102.6 line 2686: quota = max(1, min(5, quota))  # cap 5 (V1102.2 line 211 微头条 5 篇/天硬上限)
+    - _read_whitelist_with_quota 默认 quota = 1 (xlsx 白名单 B 列空)
+    - 双重限制把缺哥实际素材数压到 5 篇/号
+
+  修法 (2026-05-15 11:00):
+    - quota = max(1, quota) # 取消 min(5,quota) cap, 自然停于素材池
+    - _read_whitelist_with_quota 默认 quota = 9999 (xlsx B 列被忽略)
+    - 4 mac 推 md5 = 5d8773bdbfce7c002d55cd472f09fe62
+
+  落地版本: V1102.9 mac 端真版 (含本修)
+  落地时间: 2026-05-15 11:30
+  备注: 仅 4 mac 推; Win 台机版同款 cap 5 修法待移植
+
+
+============================================================
+2026-05-15 操作教训 (Claude 自省, 不归故障类)
+============================================================
+
+  教训 1: 归档时 mac/ vs win/ 路径要 ls 校验源文件 win32 / cliclick 计数,杜绝拷错版
+  教训 2: pgrep 模式 "微头条自动发布/gtg_batch.py" 漏匹配 (cmdline 不含 cwd),应改 lsof -p PID | grep cwd 或 pgrep -fl python3 + grep
+  教训 3: 罐头是定时文章 + 微头条 + 文章自动 三件共享进程,杀重启前先实证三件是否在跑 (pgrep 不准则用 lsof)
+  教训 4: ssh inline 复杂 python 太多次,违反 [feedback_跨机操作直接scp_python];应直接 scp .py + python3 跑
