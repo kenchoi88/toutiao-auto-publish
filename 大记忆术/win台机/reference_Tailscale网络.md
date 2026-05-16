@@ -13,6 +13,14 @@ originSessionId: f99b6b5b-4ea0-48d9-baf7-b1b507d56ce3
 - 控制台 ACL `ssh` 段:`{"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot", "root"]}` — 只允许同 tailnet 自己人(就缺哥一人)互通,外人 SSH 不进来
 - 以后**新加机/重置 tailnet/重写 ACL** 务必保持 `accept`,改回 `check` 又要点链接;air 那条「首次需浏览器一次性审批」备注已过时
 
+**⚠️ 双门控:控制台绿色 `SSH` 标签 ≠ ACL accept(2026-05-16 neo 实证)**
+- ACL `accept` = **tailnet 那道门**:授权某 src→dst 流量进 Tailscale SSH 代理
+- 节点 `tailscale set --ssh=true`(或 `up --ssh`) = **节点那道门**:本机起 Tailscale SSH 代理监听,admin 控制台才显示绿色 `SSH` 标签
+- 两道门**双重门控**,缺一不可。只有 ACL accept 而节点没 `--ssh`,SSH 仍能走系统 sshd(22 端口)经 Tailscale 网络层通,但走的不是 Tailscale SSH(无审计/无浏览器免授权红利),控制台无标签
+- **诊断路径**:看 admin 控制台 https://login.tailscale.com/admin/machines 哪台缺标 → 该机 `tailscale set --ssh=true [--accept-risk=lose-ssh]`(若当前 SSH 会话存在会警告,加 `--accept-risk` 接管)
+- **缺哥 5 机 2026-05-16 历史**:台机/air/mini/neo2 都启过 `--ssh`(面板有标),neo 一直只有系统 sshd 走 22(面板无标),今天 `tailscale set --ssh=true` 补齐
+- **新加机 / 重装 tailscale** checklist 加这条:`tailscale up --ssh` 而不是 `tailscale up`(避免又漏)
+
 
 | 机器 / 角色 | Tailscale hostname | Tailscale IP | 备注(2026-04-27) |
 |---|---|---|---|
