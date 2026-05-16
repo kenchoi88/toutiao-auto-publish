@@ -6,42 +6,61 @@
 已修
 ────────────────────────────────────────────────────────────
 
-  故障 1 — V1102.9 collect_accounts 兜底段漏改 strip,4 mac 账号数虚高 +2 复发
+  故障 1 — V1102.9 collect_accounts +2 真因 = [class^="account-"] 误命中外层容器面板 (阿良 air 实证)
   ─────────────────────────────────────────────────────────────────
-  影响范围: 4 Mac (mini/air/neo/neo2) × 微头条件 (台机不受影响)
+  影响范围: 4 Mac × 微头条件 (台机不受影响,台机件不在此次诊断链)
 
   现象:
-    - 缺哥肉眼数 mac 真实账号 120,脚本 collect 出 122,跨多次 collect 仍 +2
-    - 5-15 故障 2 修法应已防 +2,今天复发 = 修法没修齐
+    - 缺哥肉眼数 mac 真实账号 N (mini=120/air=122/...),脚本 collect 出 N+2
+    - 5-15 strip 修法 + 5-16 兜底 strip 修法 (绣虎) 都是猜「角标数字」方向, 实测无效复发
 
-  根因:
-    - 5-15 故障 2 修法明示「修 line 714 + line 766 (兜底段) 取 textContent.trim() 后 strip 前导数字角标」
-    - 实际只改 line 711 (主循环 textContent.trim() 后 t.replace(/^\d+\s*/,"")),兜底段 line 768 漏改
-    - 主循环跑出 120 干净,兜底段 (滚到容器底再扫一次) 命中带角标 entry "2\n张三"
-      跟主循环已收录 "张三" 算 2 个独立 string,seen.add 通过,accounts +1;另一账号同款 → +2 总和
-    - 5-15 推送声明「全件实证」时没真跑「主循环 + 兜底段」双段 dump 比对,漏件未发现
+  真因 (阿良 2026-05-16 air CDP dump 铁证):
+    - V1102.8 把 ACCOUNT_CLASS 改成 "account-" 模糊前缀「抗 hash 升级」
+    - 副作用: querySelectorAll('[class^="account-"]') 同前缀命中 2 个外层容器面板:
+      * account-rzlFoc  账号管理标题栏  尺寸 1086+ × 3131+
+      * account-wAITr1  过滤栏面板        尺寸 1086+ × 3131+
+    - 真账号 row className=account-cBAwuL (hash 同 5-15 实证),尺寸 176×46 小卡片
+    - +2 是恒定的 (不是瞬态),只是触发条件 = 罐头页面在 /v1/account/account
+      mini 平时停在 /v1/home 不触发, gtg 启动 collect 时罐头自动到 account 页 → 立即 +2
 
-  修法 (2026-05-16):
-    - 4 mac /Users/<u>/Desktop/微头条自动发布/gtg_batch.py 兜底段 line 768 (原裸 textContent.trim()) 后插一行:
-      t = t.replace(/^\d+\s*/, "");  // [v1102.9 兜底补 2026-05-16] 同步 strip 防 +2 (5-15 漏改修齐)
-    - 跟主循环 line 711 同款 strip 逻辑
-    - 走 patch_collect_strip.py 幂等 patch 脚本 + py_compile 校验 + 失败回滚
-    - 不叠新版本号 (memory 第一条铁律 V1102 后不叠 .X),仅在故障说明 + 注释标记 5-16 修齐
+  绣虎自查盲点 (反思):
+    - 5-15 strip 是猜的角标格式, 没 dump DOM 实证
+    - 5-16 早上重复同款补漏 (strip 兜底), 仍是猜
+    - 10:00+ dump mini 出 120 干净时未深究 - mini 那时在 /v1/home 不触发
+    - 应当看完 air 阿良 dump 才下修法, 而不是用 strip 套 strip
+
+  修法 (2026-05-16, 阿良铁证 + 绣虎落地 4 mac):
+    - 6 处 querySelectorAll('[class^="{ACCOUNT_CLASS}"]') 后立即 filter:
+      items = Array.prototype.filter.call(items, function(_el){
+          var _r=_el.getBoundingClientRect();
+          if(_r.width>250||_r.height>60)return false;     // 真 row 176×46, 容器 1086+×3131+
+          if(!_el.querySelector('[class*="horizontalAccount"]'))return false;  // 冗余双保险
+          return true;
+      });
+    - 6 处覆盖: collect_accounts 主循环 + 兜底 + scroll_find_account ×2 + find_account_webview + _locate_filtered_account
+    - 注释 [v1102.9 阿良修 2026-05-16 容器面板误抓 fix] 不叠版本号 (memory 第一条铁律)
+    - 5-15/5-16 strip 行保留 (阿良判定: 治另一类潜在问题, 无害)
+
+  实证 (mini 罐头 CDP 9223 dump, patch 后导航到 /v1/account/account):
+    - raw querySelectorAll = 42, filter 后 = 40, 差值 2
+    - 排除的 2 entry 实证 = account-rzlFoc + account-wAITr1, 尺寸 1220×6151 / 1156×6031, 跟阿良铁证完全一致
+    - 关键发现: 这 2 容器 hasH=True (子树也含 horizontalAccount, 因为容器包裹整个面板),
+      horizontalAccount 子判定对容器**无效**, 真正起作用的是尺寸过滤。阿良 hasH 那条是冗余双保险。
 
   4 维表:
-    ┌──────┬──────────────────────────────────────┬────────────┬─────────────┬──────────────┐
-    │ 机   │ md5 (patch 前 → 后)                  │ py_compile │ 注释行号    │ 实测 collect │
-    ├──────┼──────────────────────────────────────┼────────────┼─────────────┼──────────────┤
-    │ air  │ 03754b... → e6600e... → (注释微调)   │ OK         │ line 768 ✓  │ 待重启 gtg   │
-    │ neo  │ 03754b... → e6600e... → (注释微调)   │ OK         │ line 768 ✓  │ 待重启 gtg   │
-    │ neo2 │ 03754b... → e6600e... → (注释微调)   │ OK         │ line 768 ✓  │ 待重启 gtg   │
-    │ mini │ 03754b... → e6600e... → (注释微调)   │ OK         │ line 768 ✓  │ 待重启 gtg   │
-    └──────┴──────────────────────────────────────┴────────────┴─────────────┴──────────────┘
-    - 注释标记从 [v1102.10] 改回 [v1102.9 兜底补 2026-05-16] (不叠版本号)
-    - 实测列待缺哥 4 mac 重启 gtg_batch 后 collect 数 = 真实账号数 (no +2) 才能填 ✓
+    ┌──────┬──────────────────────────────────────┬────────────┬──────────────────┬──────────────┐
+    │ 机   │ md5 (5-16 早 strip 兜底 → 阿良 fix)  │ py_compile │ filter 注入处数  │ 实测 collect │
+    ├──────┼──────────────────────────────────────┼────────────┼──────────────────┼──────────────┤
+    │ mini │ a207c989... → daa20013...            │ OK         │ 6                │ 待重启 gtg   │
+    │ air  │ a207c989... → daa20013...            │ OK         │ 6                │ 待重启 gtg   │
+    │ neo  │ a207c989... → daa20013...            │ OK         │ 6                │ 待重启 gtg   │
+    │ neo2 │ a207c989... → daa20013...            │ OK         │ 6                │ 待重启 gtg   │
+    └──────┴──────────────────────────────────────┴────────────┴──────────────────┴──────────────┘
+    - 实测列待缺哥 4 mac 重启 gtg 后 collect 数 = 真实账号数 (no +2) 才能填 ✓
 
   防再犯:
-    - 任何 collect_accounts 类双段 (主循环 + 兜底) 改动,strip / dedupe 逻辑必须双段同款
-    - 「全件实证」声明前必跑双段 dump,不只主循环
+    - querySelectorAll 模糊前缀 selector 必须配合 DOM 结构/尺寸过滤, 不能只信 className 前缀
+    - 类似「+N 误识」类 bug 必须先 dump DOM 看精确 entry 形态, 再下修法; 禁先猜 strip
+    - 跨机协同: 现场机 (阿良/小齐/东山) dump 实证 + 绣虎落地全机, 双向通气
 
 ============================================================
