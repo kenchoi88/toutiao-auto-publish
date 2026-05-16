@@ -160,7 +160,7 @@ def find_breakpoint(items, log_file):
     return (idx + 1) % len(items)
 
 
-def write_whitelist(items, start_idx, kind):
+def write_whitelist(items, start_idx, kind, quota_total):
     p = HERE / "账号配置.xlsx"
     if not p.exists():
         print(f"✗ 当前件无 账号配置.xlsx: {p}"); sys.exit(1)
@@ -180,12 +180,14 @@ def write_whitelist(items, start_idx, kind):
         if ws.max_row >= 2:
             ws.delete_rows(2, ws.max_row - 1)
     r = 2
+    # [2026-05-16 缺哥拍] B 列写 QUOTA_TOTAL 不写漏数,跟 gtg_batch acc_count<quota 语义对齐
+    # 修前: 漏数 (QUOTA-已发) → 接续点累计已发 > 漏数被立刻跳; 修后: QUOTA_TOTAL 让累计上限自然停
     for name, miss in ordered:
-        ws.cell(r, 1, name); ws.cell(r, 2, miss); r += 1
+        ws.cell(r, 1, name); ws.cell(r, 2, quota_total); r += 1
     wb.save(p)
 
     total = sum(m for _, m in ordered)
-    print(f"✓ 白名单 {r-2} 行 / 共 {total} 篇待补")
+    print(f"✓ 白名单 {r-2} 行 / 共 {total} 篇待补 (xlsx B 列写 QUOTA={quota_total})")
     print(f"  首位(断点): {ordered[0][0]}  漏 {ordered[0][1]} 篇")
     print(f"  末位:         {ordered[-1][0]}  漏 {ordered[-1][1]} 篇")
 
@@ -238,7 +240,7 @@ def main():
     else:
         print(f"  断点: items[{start_idx}] = {items[start_idx][0]}\n")
 
-    write_whitelist(items, start_idx, kind)
+    write_whitelist(items, start_idx, kind, quota_target)
     print()
     print("下一步: 双击 go.command (或 go.bat) 启动跑")
 

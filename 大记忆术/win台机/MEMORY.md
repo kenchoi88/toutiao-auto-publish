@@ -1,4 +1,8 @@
-- ❗ [推版本必须全件实证再汇报 + 不叠版本号(V1102 为准)](feedback_推版本必须全验证再汇报.md) — 推完贴 4 维表(件×标记×py_compile×实测)才算完;V1102 后不叠 .1/.2/.3,新功能写版本说明+memory(2026-05-05 v1102 三连推漏件爆雷)
+- ❗ [推版本必须全件实证再汇报 + 不叠版本号(V1102 为准, V1103 已收口)](feedback_推版本必须全验证再汇报.md) — 推完贴 4 维表(件×标记×py_compile×实测)才算完;V1102 后不叠 .1/.2/.3,新功能写版本说明+memory(2026-05-05 v1102 三连推漏件爆雷;2026-05-16 V1103 大统一收口 mac/win 5 机 3 件)
+- ❗ [V1103 接续算法验证标志升级 — log YY ≡ 首篇 publish ZZ 双锁](feedback_接续算法验证标志升级.md) — V1102.6 实证只看 log 「从下一位 YY 起跑」漏了 sent_accounts_set 预注入跳过接续点的边界, 跑了 5 天伪生效;V1103 验证标志必须 YY ≡ ZZ 双锁(2026-05-16)
+- ❗ [V1103 quota 算法 — (素材+已发)//全员 整除, 余数留池, 无 cap, 缺 N 补 N](feedback_quota算法缺N补N全员分母.md) — 死规则:`_full_accounts_count` 全员分母, `sub_rounds=_quota_per` 动态, 白名单只优先排序不剔除, B 列 quota 忽略;cap 5/3 是历史臆造平台上限, V1103 全 5 机 3 件统一取消(2026-05-16)
+- ❗ [WIN MAC 不可跨推 — 5/14 错推 V1102.9 win 到 mac 大爆雷](feedback_WIN_MAC不可跨推.md) — WIN/MAC 是两条独立线(V1102.8 之后), 鼠标输入层+ACCOUNT_CLASS+ZOOM_FIX+collect 都不同;归档时 mac/ vs win/ 必分开源 + grep win32/cliclick 数实证(2026-05-14 错推 + 5/16 修齐)
+- ❗ [台机 collect_accounts B 方案 — 稳定换速度](feedback_collect_accounts_B方案_稳定优先.md) — same_count >= 4 容错 + 兜底 while 滚到底等 2s 直到 no_new_count >= 3;collect 时间 ~15s → ~40-60s 但保证 304 全收;不为快回退单条件 break(2026-05-16 18:53 漏 64 个账号实证)
 - ❗ [版本说明 / 故障说明 存放位置](feedback_版本说明故障说明存放位置.md) — 新版本说明放 自动发布/自动发布V<X>/V<X>版本说明.txt(跟版本号目录绑);故障说明 自动发布/故障说明/故障说明_YYYY-MM-DD.txt 当日独立 + 未修/已修分段;根 版本说明.txt 故障日志.txt 只留指针不再 append(2026-05-05 缺哥两纠)
 - ❗ [patch 完必清 .bak / 临时监听用完即删](feedback_patch完必清bak.md) — patch/clear/align 后必清 .bak+__pycache__+~$*;临时 hook/监听/cron/patch 脚本同款用完即拆,不囤积(2026-05-05)
 - ❗ [跨机 ssh 启脚本必须 login shell](feedback_跨机ssh必须login_shell.md) — ssh 远程起 python 一律 bash -lc / 显式 PATH,裸 ssh 起 non-interactive PATH 不含 brew,cliclick 找不到无声白跑(2026-05-05 NEO 5h 事故)
@@ -13,7 +17,7 @@
 - ❗ [DS创作 exe 洗稿直连 — v2rayN routing 锁出口](reference_DS创作exe洗稿_v2rayN_routing锁出口.md) — DS创作V1.1.0.exe(Electron)不读 env/trust_env,2026-05-12 .py 三件套修法对 exe 0 作用;重启 exe 后 ProxyOverride bypass 缓存丢,走 SOCKS;**真正根治** = v2rayN routing 加 `*.volces.com→direct` 锁 xray 出口为国内 IP,跟 exe 行为解耦;多副本 single-instance 用 `--user-data-dir=` 隔离(2026-05-16)
 - ❗ [不许说粗口 — 中性表达](feedback_不说粗口.md) — 操/草泥马/你麻痹/麻痹/几把/卧槽/妈的等任何粗口禁用(含拼音谐音变体);缺哥可以骂,我不学,改"认错/收到/明白/抽风"等中性词(2026-05-06 第二次拍要立 memory)
 - ❗ [跳过 X 类不筛要管 v0,不只 Claude](feedback_跳过类要覆盖v0.md) — 缺哥说「今天 X 类不筛我自己来」要覆盖整条流水线(v0+Claude+用户);跑爆款下载前 patch 我的删法_v0.py 跳过该类规则,或下载完 diff 原始 vs 筛后回填(2026-05-08 国际 v0 删 211 篇被缺哥捉,刻意没提醒)
-- [发文上限与补漏规则](project_发文上限与补漏规则.md) — 微头条 5 篇/号、文章 & 定时文章 3 篇/号;漏 N 补 N、已达上限不动
+- [发文上限与补漏规则] (project_发文上限与补漏规则.md) — ⚠️ V1103 取消 cap (2026-05-16),原条「微头条 5 篇/号 + 文章 3 篇/号」过时, 改成「(素材+已发)//全员 整除自然停于素材池,无 cap」详见 [[feedback_quota算法缺N补N全员分母]];漏 N 补 N、已达 quota 不动
 - [机器拓扑(5 台)](project_机器拓扑.md) — Mac × 4(air/neo/neo2/mini)+ Win 台机 × 1;指令需覆盖全部
 - [跨机方案与路由器](project_跨机方案与路由器.md) — 平时电信 AX3,移动 Q6 备用;跨机走 Tailscale(2026-05-02)
 - [小旋风组网方案](project_小旋风组网方案.md) — 已废,缺哥 2026-04-30 退货;现状平时电信 AX3 + 移动 Q6 备用

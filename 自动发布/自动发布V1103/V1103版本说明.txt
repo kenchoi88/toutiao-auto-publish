@@ -1,0 +1,311 @@
+============================================================
+自动发布 — V1103 版本说明 (2026-05-16 · 缺哥拍 · 大统一)
+============================================================
+版本号:    V1103
+落地日期:  2026-05-16
+落地范围:  5 机 × 3 件 = 15 文件 (mac 4 机 mini/air/neo/neo2 + win 1 台)
+            ┌──────────────────┬─────────────────────────────────────────┐
+            │ 件名             │ V1103 改动 (统一对齐)                   │
+            ├──────────────────┼─────────────────────────────────────────┤
+            │ 微头条自动发布   │ ✓ 全套核心算法对齐 + 双 TXT (mac 独有) │
+            │ 文章自动发布     │ ✓ 全套核心算法对齐                      │
+            │ 文章定时自动发布 │ ✓ 全套核心算法对齐 (timer 3 窗口架构)   │
+            └──────────────────┴─────────────────────────────────────────┘
+
+背景:
+  V1102.6 (5-10) 实证标志只看 log 不看 publish 行为, 漏掉 sent_accounts_set
+  预注入跳过接续点这个边界场景, 5/14 + 5/16 暴露 + 修齐。同时积压多个
+  cap/算法分歧 (cap 5 / cap 3 / sub_rounds 写死 / quota 算分母错位 /
+  log 残留多版本号前缀) 一并清理。统一升 V1103 收口。
+
+依据故障说明: 自动发布/故障说明/故障说明_2026-05-16.txt
+
+============================================================
+一、核心算法对齐 5 项 (mac + win 同款实现, 跨件统一)
+============================================================
+
+【改动 1】删除 sent_accounts_set 预注入 — 让 V1102.6 接续算法真生效
+─────────────────────────────────────────────────────────────────
+旧代码:
+    sent_accounts_set = set()
+    sent_count_map = _read_sent_with_count()
+    for _sv in sent_count_map:
+        sent_accounts_set.add(_sv)         ← 这两行删
+
+新代码:
+    sent_accounts_set = set()
+    sent_count_map = _read_sent_with_count()
+    # 不预注入 — sent_accounts_set 只在 run_death_grip 内每个小轮 add
+    # acc_count<quota 检查独立挡超发, 无需 sent_accounts_set 预跳
+
+Why:
+  V1102.6 (5-10) 接续算法移出 if _wl_q 块后, log 写「从下一位 YY 起跑」对,
+  但 _is_eligible 里 `name not in sent_accounts_set` 检查会让接续点账号
+  (本轮已发部分) 被跳过, 实际首篇 publish 落到顺位下一个 0 篇账号。
+  5/14 V1102.7 落地 → 跑了 5 天没暴露 (实证场景接续点账号本轮都未发过) →
+  5/16 socket 异常 + 重启场景把这个伪生效边界场景暴露出来。
+
+业务效果:
+  - 接续 log YY ≡ 实际首篇 publish ZZ (锁双标志, 不再只看 log)
+  - 小 1 直接从接续点 publish, 不再绕一圈到小 2
+
+【改动 2】quota 算法统一 — 全员账号分母, 无 cap, 缺 N 补 N
+─────────────────────────────────────────────────────────────────
+旧代码 (各件分别有 cap 5 / cap 3 / 写死硬上限):
+    # 微头条: max(1, min(5, (len(docs)+sent_total) // len(accounts)))
+    # 文章自动: max(1, min(3, ...))
+    # 文章定时: max(1, min(3, ...))
+
+新代码 (全员账号 _full_accounts_count 分母, 无 cap):
+    # 收集账号 + EXCLUDE 过滤后保留全员数
+    _full_accounts_count = len(accounts)
+    # ... 白名单优先排序 (但不剔除) ...
+    _quota_per = max(1, (len(docs) + sent_total) // _full_accounts_count)
+    _quota_余 = (len(docs) + sent_total) % _full_accounts_count
+    quota_map = {a: _quota_per for a in accounts}
+
+Why:
+  - cap 5 (微头条) / cap 3 (文章) 是臆造的「平台上限」, 实际平台无此限。
+    用户要求每号能发 8/10/N 篇 → cap 直接卡死, 需要逐版本撤
+  - 旧分母 `len(accounts)` 是白名单过滤后, 跟「全员」概念错位 →
+    白名单 112 个时算出 quota 比应得的 (用全员 120) 小 1 → 漏发 120 篇/天
+  - 余数留素材池, 不漏不丢, 跟「除得尽就发, 除不尽留着」业务一致
+
+业务效果:
+  例 960 素材 / 120 全员 = quota=8 余 0;每号发 8 篇满素材池
+  例 1000 素材 / 120 全员 = quota=8 余 40;每号发 8 篇 + 40 篇留下次
+  例 304 全员 × 3 时段 = 912 任务 (文章定时 timer 3 窗口排满)
+
+【改动 3】sub_rounds 动态对齐 quota
+─────────────────────────────────────────────────────────────────
+旧代码 (各件不同写死值):
+    # 微头条 mac: sub_rounds=5,  win: sub_rounds=10
+    # 文章自动 / 文章定时: sub_rounds=3,
+
+新代码 (全员动态):
+    sub_rounds=_quota_per      # 函数签名默认值改 sub_rounds=1 占位
+    或
+    sub_rounds=quota_total     # 文章定时 Stage 2 死磕
+
+Why:
+  sub_rounds 决定 run_death_grip 死磕循环最多跑几小轮, 每小轮过一遍
+  accounts 每号最多 publish 1 篇 → sub_rounds = 每号 publish 次数上限。
+  写死 3/5/10 跟 quota 不一致 → quota=8 但 sub_rounds=5 → 漏 3 篇/号
+
+业务效果:
+  quota=8 → sub_rounds=8 → 每号死磕到发满 8 篇
+
+【改动 4】白名单只优先排序, 不剔除账号, B 列 quota 忽略
+─────────────────────────────────────────────────────────────────
+旧代码 (有白名单时剔除非白名单):
+    if _wl_q:
+        accounts = [a for a in _orig if a in _wl_names]   ← 剔除
+        for a in accounts:
+            per_account_quota[a] = wl_map.get(a) or default_q   ← B 列 quota
+
+新代码 (优先排序 + 追加非白名单, 全员都发):
+    if _wl_q:
+        _new_accounts = [白名单匹配的真号 优先排序]
+        # 追加不在白名单的账号到末尾, 保证全员都发
+        for a in _orig_accounts:
+            if a not in _seen:
+                _new_accounts.append(a)
+                _seen.add(a)
+        accounts = _new_accounts
+    # B 列 quota 忽略, 统一用 _quota_per
+
+Why:
+  - catchup.py 写白名单基于 quota_target=5/3 剔除已满 quota 账号 →
+    新 quota 算法可能算出 8/N, 被剔除的账号 (8-sent) 篇没发漏掉
+  - 用户不手填 B 列, B 列 quota 无意义。catchup 写「漏数」让 main 用
+    acc_count<quota_map 检查时维度错位 → 接续点账号直接被跳
+
+业务效果:
+  4 mac 实测 17:27 接续从「进入猫次元」起跑, 全员 120 都发到 quota 满
+  (老版 active=3 死锁, 新版 active=120 全员 publish)
+
+【改动 5】log 字符串里 [v1102.X] / [v1102] 前缀全清
+─────────────────────────────────────────────────────────────────
+旧代码:
+    log(f"  [v1102.6] 中断处自动接续:最近 publish「XX」 → 从下一位「YY」起跑")
+    log(f"  [v1102] 素材池剩 N 篇 + 已发累计 M 篇 = ...")
+    log(f"  [v1102] 中断恢复:第 X 小轮第 Y 账号断点")
+    log(f"  [v1102] 从 notice_checked.txt 恢复 ...")
+    log(f"  [v1102] last_published.txt 读取失败: ...")
+
+新代码 (清前缀, 代码注释保留版本号供溯源):
+    log(f"  中断处自动接续:...")
+    log(f"  素材池剩 ...")
+    log(f"  中断恢复:...")
+
+Why:
+  当前是 V1103, log 里残留 [v1102.6] / [v1102] 让用户以为还在跑旧版,
+  跑出旧版本号信息容易让缺哥误判出 bug 是哪个版本引入的。
+  代码注释里的版本号 (供以后查溯源) 保留不动。
+
+============================================================
+二、mac 微头条独有 — V1102.9 双 TXT (5-14 重构)
+============================================================
+
+  改动 A — check_system_notice 数据源
+    旧: var lines = (document.body.innerText || '').split(/\r?\n/);
+    新: var rows = document.querySelectorAll('.chat-container-list .chat-row');
+    Why: body.innerText 把左侧 5 频道列表预览全卷入, isDateLine 把
+         左侧时间戳误判为日期行 → 周报正文被切进 2 天窗口贴错频道标签
+
+  改动 B — 双 TXT 独立写入
+    旧: 系统通知 / 审核通知 合并写入 系统通知.txt
+    新: NOTICE_FILE("系统通知.txt") + AUDIT_FILE("审核通知.txt") 各归各的
+
+  改动 C — 砍违规提醒.txt 整段 (5-14 实证关键词体系跟头条用语错位)
+
+  改动 D — indexOf===0 → !==-1 (unread badge 兼容, 5-15 mac fix)
+  改动 E — ReactVirtualized 滚到底逻辑 (chat-container-list overflow:auto)
+  改动 F — 相对时间识别 (刚刚 / N 分钟前 / N 小时前)
+
+============================================================
+三、win 台机独有 — collect_accounts B 方案 (5-16 缺哥拍)
+============================================================
+
+  现象: 304 真账号, 老版本 collect 出 240, 漏 64 个
+        罐头侧栏虚拟滚动 lazy render 中, scrollTop 暂时不变被误判到底
+
+  旧代码 (V1102.8 简化):
+    for _ in range(1000):
+        ...
+        time.sleep(0.3)
+        if before_top == after_top:
+            break              ← 加载中 scrollTop 暂停就提前 break
+
+  新代码 (B 方案):
+    # 主循环: same_count 容错避免 loading 中误判到底
+    same_count = 0
+    for _ in range(1000):
+        ...
+        time.sleep(0.5)
+        if before_top == after_top:
+            same_count += 1
+            if same_count >= 4:   ← 连续 4 次不动才认定到底
+                break
+        else:
+            same_count = 0
+
+    # 兜底循环: 滚到底 + 等 2s + 扫, 直到连续 3 次没新增 (最多 20 轮)
+    no_new_count = 0
+    bottom_round = 0
+    while no_new_count < 3 and bottom_round < 20:
+        bottom_round += 1
+        强制滚到底
+        time.sleep(2.0)
+        扫
+        if 新增 > 0:
+            no_new_count = 0
+        else:
+            no_new_count += 1
+
+  代价: collect 时间从 ~15s 变 ~40-60s, 缺哥拍「慢就慢」
+  收益: 304 个账号全 collect, 不漏发 64 个
+
+============================================================
+四、ACCOUNT_CLASS 写死精确 hash (mac 微头条)
+============================================================
+
+  旧 (V1102.9 mac 错推 win): ACCOUNT_CLASS = "account-"  # 前缀模糊
+  新 (V1103 mac):             ACCOUNT_CLASS = "account-cBAwuL"  # 精确 hash
+
+  Why:
+    前缀模糊在 mac 上误命中 2 个外层容器面板 → +2 伪账号 → 一连串补丁
+    (strip 角标 → 阿良 filter → 仍间歇失效)
+    精确 hash 根本不会误命中, 不需要 strip / filter 兜底
+    CDP probe 实证 mini 罐头当前真账号 className = account-cBAwuL × 120
+
+  副作用: 罐头升级 hash 时人工改 1 行, 每隔几月 1 次, 比补丁稳
+
+============================================================
+五、4 维实证表 (5 机 × 3 件)
+============================================================
+
+  | 机   | 件   | md5                                  | py_compile | 实测 |
+  |------|-------|--------------------------------------|------------|------|
+  | mini | 微头条 | 35e3b898e35998b59d6e8ea02b995e54     | OK         | ✅ 17:27 「进入猫次元」接续真发 |
+  | mini | 文章自动 | 2783e9f173af137604cc7e9ba8865f8f     | OK         | 待重启 |
+  | mini | 文章定时 | a0ddc6d661a2673a762027926e193d6b     | OK         | 待重启 |
+  | air  | 微头条 | 35e3b898e35998b59d6e8ea02b995e54     | OK         | ✅ 17:47 「潇洒公子」接续真发 |
+  | air  | 文章自动 | 2783e9f173af137604cc7e9ba8865f8f     | OK         | 待重启 |
+  | air  | 文章定时 | a0ddc6d661a2673a762027926e193d6b     | OK         | 待重启 |
+  | neo  | 微头条 | 35e3b898e35998b59d6e8ea02b995e54     | OK         | ✅ 17:44 「来年春渐浓」接续真发 |
+  | neo  | 文章自动 | 2783e9f173af137604cc7e9ba8865f8f     | OK         | 待重启 |
+  | neo  | 文章定时 | a0ddc6d661a2673a762027926e193d6b     | OK         | 待重启 |
+  | neo2 | 微头条 | 35e3b898e35998b59d6e8ea02b995e54     | OK         | ✅ 17:42 「八月如歌」接续真发 |
+  | neo2 | 文章自动 | 2783e9f173af137604cc7e9ba8865f8f     | OK         | 待重启 |
+  | neo2 | 文章定时 | a0ddc6d661a2673a762027926e193d6b     | OK         | 待重启 |
+  | 台机 | 微头条 | afadeb23250a787789f6238076723613     | OK         | 待重启 |
+  | 台机 | 文章自动 | 071c004c331c3f2d5bcc5c338103c7c4     | OK         | 待重启 |
+  | 台机 | 文章定时 | d5c6dafaad4486439ba524cb7bb3f3fa     | OK         | ✅ 18:56 collect 304 全员 / quota 3 / 912 任务 / 早中晚 3 窗口 |
+  | 台机 | 文章定时(辅助 batch) | 22f35b19371d17ed5d7cc60bbc9dc868 | OK | (供 timer.py import collect_accounts) |
+
+  mac md5 4 机一致, win md5 跟 mac 不同 (win 含 V1102.8 win 改动:
+  ZOOM_FIX_ACCOUNTS / collect break 简化 / win32api)
+
+============================================================
+六、新立验证标志 (V1102.6 实证教训)
+============================================================
+
+  V1102.6 (5-10) 验证标志只看 log 「从下一位 YY 起跑」, 没看实际首篇
+  publish 是否真的从 YY 起跑 → 5 天伪生效没暴露。
+
+  V1103 升级验证标志:
+    log YY (接续算法) ≡ ZZ (首篇 publish 实际账号名)
+    双锁才算真接续, 缺一不可。
+
+  此标志写入 memory feedback_接续算法验证标志升级.md
+
+============================================================
+七、CATCHUP.PY 接口升级
+============================================================
+
+  自动发布/工具/catchup.py:
+    旧: write_whitelist(items, start_idx, kind) — B 列写「漏数」
+    新: write_whitelist(items, start_idx, kind, quota_total) — B 列写 QUOTA_TOTAL
+
+  Why:
+    catchup 写漏数, main 用 acc_count(累计) < quota_map(漏数) 检查时维度
+    错位 → 接续点账号累计已发 > 漏数立刻被跳过 → 5/16 mini 实证暴露
+
+  V1103 设计上 main 已忽略白名单 B 列 quota (统一用 _quota_per), catchup
+  写啥都不影响算法, 但保持参数对齐供以后用。
+
+============================================================
+八、议题决议遵守 / 教训
+============================================================
+
+  - 5 机 mac 4 + win 1 全部同步 ✅
+  - 故障说明 5-16 详细记录 9 项故障 + 修法 (单独文件)
+  - 立 4 条 memory 教训:
+    * feedback_接续算法验证标志升级.md
+    * feedback_WIN_MAC不可跨推.md
+    * feedback_quota算法缺N补N全员分母.md
+    * feedback_collect_accounts_B方案_稳定优先.md
+  - 不再叠 V1102.X 子版本, 统一 V1103 大版本号收口
+  - 5 道闸门 (diff 给缺哥过目 + grep + py_compile + 推 1 台 + 全推) 遵守
+
+============================================================
+九、归档 (按 memory feedback_每发版必归档)
+============================================================
+
+  自动发布/自动发布V1103/
+    ├── V1103版本说明.txt                 ← 本文
+    ├── 微头条自动发布V1103/
+    │   ├── mac/gtg_batch.py              (md5 35e3b898...)
+    │   └── win/gtg_batch.py              (md5 afadeb23...)
+    ├── 文章自动发布V1103/
+    │   ├── mac/gtg_batch.py              (md5 2783e9f1...)
+    │   └── win/gtg_batch.py              (md5 071c004c...)
+    └── 文章定时自动发布V1103/
+        ├── mac/gtg_timer.py              (md5 a0ddc6d6...)
+        └── win/
+            ├── gtg_timer.py              (md5 d5c6dafa...)
+            └── gtg_batch.py              (md5 22f35b19..., 辅助)
+
+  hash 三连: 待 push 后补
+============================================================
