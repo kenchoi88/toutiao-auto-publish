@@ -20,6 +20,7 @@
   - 每窗内按 Excel 顺序，相邻账号间隔 1 分钟（超出自然延后，不截断）
 """
 
+import dpi_fix  # [v1103] Win高DPI 2026-05-18 阿良 (默认no-op, 需 setx DPI_FIX_ENABLE=1)
 import requests
 import base64
 import json

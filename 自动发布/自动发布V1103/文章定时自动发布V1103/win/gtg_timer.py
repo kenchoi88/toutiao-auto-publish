@@ -23,6 +23,7 @@
   - 间隔 1 分钟，按 Excel 顺序发；超时自然延后不截断
 """
 
+import dpi_fix  # [v1103] Win高DPI 2026-05-18 阿良 (默认no-op, 需 setx DPI_FIX_ENABLE=1)
 import os
 import sys
 import time

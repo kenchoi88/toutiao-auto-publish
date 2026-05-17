@@ -1,0 +1,68 @@
+故障说明 2026-05-18
+===================
+
+## 已修
+
+### v1103 加入 dpi_fix.py — Win 11 高 DPI 缩放跨机修复 (阿良)
+
+**背景:**
+新台机(kenchoiwinmini @ 100.95.244.10) 全新 Win 11 Pro 25H2 装好后,
+跑文章自动发布 gtg_batch.py 报:
+  [01:11:53] X 发布失败: 找不到文档导入按钮
+
+绣虎下午搬家时已配 OpenSSH/Tailscale/罐头/Python,但运行三大件无法点击罐头.
+
+**诊断过程 (阿良 远程 CDP dump 实证):**
+1. 先排除依赖问题:
+   - 第一次错: `No module named 'win32gui'` → 装 pywin32 修
+   - 第二次错: 找不到文档导入按钮 → 进入深层诊断
+
+2. 通过 CDP 9223 连罐头主窗口 webview, dump 所有 .syl-toolbar-button:
+   - 11 个 tab 全部 syl_count=0, editor=False
+   - innerW=0 innerH=0, devicePixelRatio=1.5
+   → 关键发现:罐头 webview 看到 1.5x DPI, 但 webview 全停首页, 没进入文章编辑器
+
+3. 真凶: Python 进程 DPI Unaware
+   - 注册表 HKCU:\Control Panel\Desktop\WindowMetrics\AppliedDPI = 144 (= 150%)
+   - 但 Win32 API (GetDpiForSystem/GetDeviceCaps) 在 DPI Unaware 进程报 96
+   - 脚本拿 webview CSS 坐标 (108,459), win32api.SetCursorPos 用物理坐标
+   - 缩放 150% 下 CSS 坐标 ≠ 物理坐标, 鼠标"飞"到偏左上 → 没点到罐头按钮
+
+**修法 (dpi_fix.py 跨机环境变量开关):**
+新建 dpi_fix.py 文件, 在 gtg_batch.py / gtg_timer.py 顶部 `import dpi_fix`:
+  - 默认 no-op (sys.platform!='win32' 或 DPI_FIX_ENABLE!=1 时 SCALE=1.0)
+  - 仅当**环境变量 DPI_FIX_ENABLE=1** 时激活
+  - 激活后:
+    a. SetProcessDpiAwareness(2) 让进程 per-monitor DPI aware
+    b. 直接读注册表 AppliedDPI (绕开 API 假报 96 问题)
+    c. monkey patch win32api.SetCursorPos → 所有调用自动 *SCALE
+
+**部署:**
+- 新台机: setx DPI_FIX_ENABLE 1 (永久) → 重启 Python 后 SCALE=1.5 patch 激活
+- 老台机: 未设环境变量 → SCALE=1.0 patch 跳过 → 行为完全不变
+- 验证实证:
+  - 新台机: [dpi_fix] SetCursorPos *=1.5 (DPI=144, source=registry) ✓
+  - 老台机: SCALE=1.0 SOURCE=disabled ✓
+- 新台机文章自动发布**实测顺利发布** ✓
+
+**跨机一致性 (阿良铁则):**
+代码 100% 跨机一致 (Win 两台同, Mac 四台同), **环境变量做开关**.
+mac 上 sys.platform!='win32' 直接跳过, 无副作用.
+后续任何新机部署只需要一行 setx DPI_FIX_ENABLE 1 (如需启用).
+
+**v1103 推入:**
+2026-05-18 阿良将 dpi_fix.py + import 同步到仓库 v1103:
+  自动发布/自动发布V1103/微头条自动发布V1103/{mac,win}/
+  自动发布/自动发布V1103/文章自动发布V1103/{mac,win}/
+  自动发布/自动发布V1103/文章定时自动发布V1103/{mac,win}/
+每个目录加 dpi_fix.py + gtg_batch.py / gtg_timer.py 顶部 import dpi_fix.
+
+**与新台机搬家配套立的记忆:**
+- 大记忆术/记忆共享/reference_新台机kenchoiwinmini_打通通道.md (今晚立)
+- 大记忆术/记忆共享/feedback_Win高DPI缩放鼠标偏移修复方案.md (本期新立)
+
+## 未修
+
+(无)
+
+——阿良 (air) 留 2026-05-18 凌晨

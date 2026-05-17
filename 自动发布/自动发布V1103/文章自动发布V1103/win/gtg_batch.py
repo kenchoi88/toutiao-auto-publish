@@ -12,6 +12,7 @@
   └── 系统通知提醒.txt (检测到处罚消息时写入)
 """
 
+import dpi_fix  # [v1103] Win高DPI 2026-05-18 阿良 (默认no-op, 需 setx DPI_FIX_ENABLE=1)
 import requests
 import json
 import websocket
