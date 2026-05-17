@@ -1,6 +1,6 @@
 ---
 name: Tailscale 网络(kenchoi315@gmail.com tailnet)
-description: 5 台机在 Tailscale 上的 hostname / IP 现状,跨机走 100.x.x.x 段
+description: 6 台机在 Tailscale 上的 hostname / IP 现状,跨机走 100.x.x.x 段(2026-05-18 新台机 kenchoiwinmini 接入)
 type: reference
 originSessionId: f99b6b5b-4ea0-48d9-baf7-b1b507d56ce3
 ---
@@ -24,7 +24,8 @@ originSessionId: f99b6b5b-4ea0-48d9-baf7-b1b507d56ce3
 
 | 机器 / 角色 | Tailscale hostname | Tailscale IP | 备注(2026-04-27) |
 |---|---|---|---|
-| Win 台机 / 绣虎 | `ken-choi` | 100.86.79.39 | 在线 |
+| Win 台机 / 绣虎 | `ken-choi` | 100.86.79.39 | 在线(老台机, SSH 端口 **2222**) |
+| 新台机 / 绣虎二代 | `kenchoiwinmini` | **100.95.244.10** | 2026-05-18 阿良立 [[reference_新台机kenchoiwinmini_打通通道]];SSH 用户 **`kench`**(≠ ComputerName `KenChoiWinMini`),**端口 22**(默认),air + 绣虎台机 公钥已灌 administrators_authorized_keys;Win 11 Pro 25H2 全新装;Tailscale SSH server 不支持 Win 端 → 控制台无绿标正常 |
 | mini / 东山 | `mini` | 100.70.22.7 | 2026-04-28 force-reauth(阿良瞎搞 Shadowrocket 把 mini 弄掉线 → 重新授权 NodeKey + 新 IP) |
 | air / 阿良 | `air` | **100.126.82.58 (2026-05-06 现状,旧 100.67.252.1 已漂)** | 2026-04-27 brew CLI 重装(LaunchDaemon 持久化);旧节点 `kenmacbook-air` 100.102.128.15 = GUI 版僵尸,admin console 删除;**2026-05-01 16:09 实测 idle 在线 + SSH 通**;2026-05-05~06 五小时 Tailscale 故障会话后 IP 漂到 100.126.82.58 |
 | neo2 / 左右 | `neo2` | 100.96.153.17 | 2026-04-27 17:50 上线 |
