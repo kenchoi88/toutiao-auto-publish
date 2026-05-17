@@ -403,7 +403,7 @@ def main():
         done_in_round = sent_total % len(all_accounts)
         remaining_in_round = len(all_accounts) - done_in_round
         log(f"中断恢复:第 {current_round} 小轮第 {done_in_round + 1} 账号断点(已发 {sent_total} 篇,quota 满跳 {skipped_full} 个 / 部分扣 {reduced} 个)")
-        log(f"    本小轮({current_round})剩 {remaining_in_round} 账号 + 后续 {quota_total - current_round} 小轮各 {len(all_accounts)} 账号")
+        log(f"    本小轮({current_round})剩 {remaining_in_round} 账号 + 后续 {base_q - current_round} 小轮各 {len(all_accounts)} 账号")
         log(f"    共 {sum(q for _, q in accounts_quota)} 篇未发")
 
     if not accounts_quota:
