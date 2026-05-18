@@ -1167,7 +1167,8 @@ def check_system_notice(ws_url, account_name):
                 var items = document.querySelectorAll('.conversation-box.notify-im-user-item');
                 for(var i=0; i<items.length; i++){{
                     var t = (items[i].innerText || '').trim();
-                    if(t.indexOf("{channel_json}") === 0){{
+                    // [v1103 2026-05-19] indexOf===0 太严, unread badge 数字会顶到 0 位; 放宽 !== -1 (跟 mac 同款)
+                    if(t.indexOf("{channel_json}") !== -1){{
                         items[i].click();
                         return 'ok';
                     }}
