@@ -483,6 +483,37 @@ def collect_accounts(main_ws):
     same_count = 0
     has_scrolled = False
 
+    # [v1103.fix 2026-05-18 阿良] 账号 ≤20 一屏装得下时直接退,避免卡死 1000 次循环
+    one_screen = js(main_ws, """
+    (function(){
+        var c = document.querySelector('[class*="menuMainWarpper"]');
+        if(!c) return null;
+        return JSON.stringify({sh: c.scrollHeight, ch: c.clientHeight});
+    })()
+    """, 109)
+    if one_screen:
+        _h = json.loads(one_screen)
+        if _h.get('sh', 0) <= _h.get('ch', 0) + 10:
+            log(f"  侧边栏一屏装得下(scrollHeight={_h['sh']} clientHeight={_h['ch']}), 跳过滚动收集")
+            v0 = js(main_ws, f"""
+            (function(){{
+                var items = document.querySelectorAll('.{ACCOUNT_CLASS}');
+                var names = [];
+                for(var i=0;i<items.length;i++){{
+                    var t = items[i].textContent.trim();
+                    if(t) names.push(t);
+                }}
+                return JSON.stringify(names);
+            }})()
+            """, 110)
+            if v0:
+                for n in json.loads(v0):
+                    if n and n not in seen:
+                        seen.add(n)
+                        accounts.append(n)
+            log(f"共收集到 {len(accounts)} 个账号")
+            return accounts
+
     for _ in range(1000):
         v = js(main_ws, f"""
         (function(){{
