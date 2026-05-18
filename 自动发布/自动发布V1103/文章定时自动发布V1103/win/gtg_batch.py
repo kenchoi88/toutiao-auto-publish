@@ -1462,7 +1462,16 @@ def publish_article(ws_url, doc_path, main_ws, name="", _credit_out=None, schedu
         wsc.close()
         return False, "找不到文档导入按鈕"
     pi = json.loads(v_import)
-    zoom_ratio = 0.9 if name in ZOOM_FIX_ACCOUNTS else 1.0
+    # zoom_ratio: 动态实测 pub_dpr/main_dpr (2026-05-18 改, 替代写死 0.9)
+    # 老台机 (sys DPI=96): 一笑酒暖花深 pub_dpr=1.125 / main_dpr=1.25 = 0.9
+    # 新台机 (sys DPI=144): 所有号 1.5/1.5 = 1.0 (罐头不再给该号 zoom)
+    _main_dpr, _pub_dpr = 1.0, 1.0
+    try:
+        _main_dpr = float(js(main_ws, "window.devicePixelRatio || 1", 62) or 1.0)
+        _pub_dpr = float(js(wsc, "window.devicePixelRatio || 1", 62) or 1.0)
+        zoom_ratio = (_pub_dpr / _main_dpr) if _main_dpr > 0 else 1.0
+    except Exception:
+        zoom_ratio = 0.9 if name in ZOOM_FIX_ACCOUNTS else 1.0
     import_x = wv0['sx'] + int(pi['x'] * zoom_ratio)
     import_y = wv0['sy'] + int(pi['y'] * zoom_ratio)
     log(f"  文档导入按钮CSS坐标:({pi['x']},{pi['y']}) webview原点:({wv0['sx']},{wv0['sy']}) => 屏幕:({import_x},{import_y}) [zoom_ratio={zoom_ratio}]")
