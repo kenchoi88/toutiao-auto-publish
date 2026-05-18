@@ -61,8 +61,149 @@ mac 上 sys.platform!='win32' 直接跳过, 无副作用.
 - 大记忆术/记忆共享/reference_新台机kenchoiwinmini_打通通道.md (今晚立)
 - 大记忆术/记忆共享/feedback_Win高DPI缩放鼠标偏移修复方案.md (本期新立)
 
+——阿良 (air) 留 2026-05-18 凌晨
+
+
 ## 未修
 
-(无)
+### 新台机微头条 8-12 时连续 393 次「弹窗未出」, 缺哥 12:51 物理点击一次后 8 小时自愈 (绣虎 21:00 排查)
 
-——阿良 (air) 留 2026-05-18 凌晨
+**背景与时序 (UTC+8):**
+  07:45:38  新台机 gtg_batch.py 启动 (PID 19328, V1103)
+            父链: python ← cmd ← go.bat ← explorer.exe (5/17 23:27 起, 早于阿良凌晨 dpi_fix setx)
+  07-08时   16 篇成功 (基线时段)
+  08-12时   连续失败 4 小时, 393 次「弹窗未出」, 141 次「X 发布失败」, 0 篇成功
+  12:51:04  突然成功 (运行日志.txt:L2722), 缺哥告知 12:51 物理点击罐头 "文档导入" 一次
+  12:51 后  到 19 时连发 580+ 篇, 13 次零星失败
+  21:00+    三人 (缺哥/绣虎/阿良) 三轮排查 + 绣虎抓 CDP 基线 4 份
+
+**影响范围:** 新台机 KENCHOIWINMINI × 微头条 V1103 PID 19328
+**影响累计:** 早晨 4 小时 0 成功 / 141 篇失败 / 393 次「弹窗未出」
+
+**现象:**
+  - 08-12 时 4 小时几乎全部失败, 固定模式:
+      [P5] frontmost 不是罐头(pid=XXXX), 重试 1/3..3/3  ← 仅 9 次
+      弹窗未出, 重 SetForegroundWindow + 重读坐标后重试  ← 393 次
+      X 发布失败: 文档导入弹窗未出现(3 次 click 重试均失败) ← 141 次
+  - 99% 失败时 P5 检测罐头**就是前台**, 焦点不是根因
+  - 12:51 缺哥物理点击 "文档导入" 按钮一次, 之后 8 小时 580+ 篇连发 0 卡
+
+**小时分布 (新台机 5/18):**
+  07时    16 / 0 / 1      (成功/失败/弹窗未出)
+  08时     8 / 23 / 70
+  09-11时  0 / 80 / 239
+  12时前半 12 / 25 / 77
+  12:51 后 556 / 11 / 33
+  20时(在跑) 36 / 2 / 6
+
+**根因排查 (3 人三轮反复推翻):**
+
+  候选 A — Win11 ForegroundLockTimeout 焦点窃取
+    阿良 reg query: 两机均 200000 一致 → 排除
+
+  候选 B — 罐头早晨某种 modal/loading 层吃 click
+    正常态 CDP 基线: 主控台 overlays=0, webview overlays=8 但 0 个覆盖 (1547,593)
+    缺哥 12:51 物理点 1 次后 8 小时不复发 ≈ 关掉一次性 modal
+    半成立, 但 modal 通常会重新弹
+
+  候选 C — Win11 mouse_event 被 Electron 过滤 / 罐头版本差异
+    两机罐头 exe 完全相同:
+      C:\Program Files (x86)\Muse\创作罐头\1.7.11\创作罐头.exe
+      ProductVersion 1.7.11.0, 媒庐科技
+    → 排除
+
+  候选 D — 罐头进程卡 GPU/CPU 积压
+    新机 Ryzen 7 PRO 6850H APU 集显, 老机 2080Ti dGPU
+    但单次踢腿不应导致 8 小时无复发
+    弱候选
+
+  候选 E — 早晨罐头窗口/webview 容器布局未稳定, (1547,593) 投错位置 ★最贴
+    CDP 嵌套: page(czgts.cn) + 10 webviews(mp.toutiao.com) + 2 SW
+    活跃 webview viewport 1386x1060 DPR=1.5
+    "文档导入" 按钮在 webview 内坐标 (757, 487) 79x27, 3 个重叠 DOM
+    坐标链: 屏幕(1547,593) → 罐头窗口 → WEBVIEW容器 → DPR → webview内(757,487)
+    任何一环偏 50px 即投错; 缺哥物理点击让窗口/布局一次性稳定 → 后续不复发
+
+**解释 12:51 自愈现象的候选检验:**
+  A (DPI 偏移)        → 应一直偏, 不解释自愈 ✗
+  B (modal 挡)        → 一次关 1 modal, 后续应复弹    △
+  C (Electron 过滤)   → 两机同, 无差异源              ✗
+  D (进程积压)        → 单次踢腿 8 小时不复发难解    △
+  E (布局未稳)        → 物理点击使窗口稳定, 8 小时不复发 ✓ 最贴
+
+**两机变量穷举 (排查实证):**
+  项                            老台机 (KEN-CHOI)         新台机 (KENCHOIWINMINI)
+  ─────────────────────────────────────────────────────────
+  AppliedDPI(注册表)            96                          144
+  DPI_FIX_ENABLE(HKCU\Env)      (空)                        1
+  gtg_batch.py md5              AFADEB23250A...             59B229E40775...
+  gtg_batch.py import dpi_fix   无 (patch 跳过, DPI=96 不需要)  第 15 行有
+  罐头 exe                       (同)                        (同) 1.7.11.0 媒庐科技
+  硬件 GPU                       2080Ti dGPU                  APU 集显
+  屏幕                          2752x1152 单屏              未知 (SSH 拿到 1024x768 虚拟桌面)
+
+**与阿良凌晨"已修"的关系 — PID 19328 实际状态不明确:**
+  - 阿良凌晨实证: "新台机: [dpi_fix] SetCursorPos *=1.5 (DPI=144, source=registry) ✓" ← 凌晨某次 Python 启动确实拿到 env
+  - 但 5/18 早晨失败的 PID 19328 是 07:45:38 启动, 父链 cmd ← explorer(5/17 23:27)
+  - DPI_FIX_ENABLE setx 时间: 5/18 01:26
+  - Win 行为 explorer 收 WM_SETTINGCHANGE 后**不刷新自己 PEB env 缓存**
+  - 从 5/17 23:27 explorer 派生的 cmd→python(07:45) 大概率拿不到 DPI_FIX_ENABLE
+  - dpi_fix.py 第 7 行 os.environ.get('DPI_FIX_ENABLE')=='1' 大概率 False → no-op → SCALE=1.0 → SetCursorPos 原坐标
+  - 无法 100% 实锤 (WMIC 拿不到进程 env), 推理链充分
+  - 但 dpi_fix 即便 no-op 也解释不了 12:51 自愈(DPI 应一直偏), 所以根因不在 dpi_fix env, 在候选 E
+
+  待验: 下次重启 gtg_batch.py 前**先关 explorer 再开**(或 Win + Shift + Restart Explorer), 强刷 env, 看微头条早晨是否就不再失败. 若仍失败 → 100% 锁定 E.
+
+**CDP 基线 (21:00 正常态 4 份):**
+  位置: C:\Users\kench\Desktop\台机专用自动发布\微头条自动发布\运行报告\20260518\baseline_snapshot_*.json
+  脚本: C:\Users\kench\_cdp_probe.py (本地仓库 _cdp_probe.py)
+
+  关键:
+    - 必须 websocket.create_connection(..., suppress_origin=True) 绕 Chromium 117+ 默认 403
+    - gtg_batch.py:46  WS_OPTS = {"suppress_origin": True} 同款
+
+  罐头 CDP 结构 (13 targets):
+    1 page          → 罐头主控台 czgts.cn/v1/account/account
+    10 webview      → 头条号 (每登录账号 1 个)
+                      1 个活跃 = mp.toutiao.com/profile_v4/weitoutiao/publish viewport 1386x1060
+                      9 个待机 = mp.toutiao.com/profile_v4/index viewport 0x0
+    2 service_worker
+
+  活跃 webview (publish, 正常态):
+    viewport 1386x1060  DPR=1.5  → 物理 2079x1590
+    "文档导入" 按钮 @(757, 487) 79x27, 3 个重叠 DOM
+    overlays 8 (modal/dialog/loading), 0 个覆盖 (1547,593)
+    (1547,593) → NULL (1547 > 1386 超出 webview viewport)
+
+  主控台 (czgts.cn):
+    viewport 1602x1152 DPR=1.5
+    (1547,593) → 命中 <WEBVIEW> 容器 (class webview-mXicTg webviewActive-pp_hGe)
+    overlays 0
+
+**下次失败抓取 SOP (缺哥拍后):**
+  1. 缺哥发现失败 → **先别物理点**, 喊绣虎或阿良
+  2. 跑 probe 抓 failure snapshot (~5s, 无侵入只读):
+     ssh kench@100.95.244.10 'C:\Users\kench\AppData\Local\Programs\Python\Python312\python.exe C:\Users\kench\_cdp_probe.py'
+  3. diff 跟今晚 4 份 baseline:
+       - 活跃 webview viewport / DPR
+       - "文档导入" 按钮 rect
+       - WEBVIEW 容器在主控台坐标系内的 rect (坐标链中间变量)
+       - overlays 列表 (有无新覆盖 (1547,593))
+  4. 缺哥再物理点击, 跑第 2 个 snapshot 拿 after state
+  5. before/after 对比锁根因
+
+**待上 instrumentation patch (阿良 5 条 + 绣虎补 1 条, 等缺哥拍):**
+  ① mouse_event 前/后 GetCursorPos 实际值
+  ② CDP document.elementFromPoint(1547,593) DOM 命中
+  ③ win32gui.GetWindowRect(罐头 HWND) 窗口位置大小
+  ④ 罐头进程 CPU% / 句柄数 / GPU
+  ⑤ SetForegroundWindow 返回值 + GetLastError
+  ⑥ document.querySelectorAll('webview') 每个 rect (坐标链关键中间变量)
+  patch 必须避开 PID 19328 (env 继承坑), 等今天跑完或脚本重启后再上
+
+**立 memory:**
+  - reference_罐头CDP嵌套结构与坐标链.md  (本地 + 大记忆术/win台机/)
+
+**待修动作:** 等下次复发现场抓 snapshot 一锤定音, 不写 instrumentation 都是猜
+
+——绣虎 (Win 台机) 留 2026-05-18 21:30

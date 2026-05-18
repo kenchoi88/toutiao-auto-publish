@@ -8,6 +8,7 @@
 - ❗ [跨机 ssh 启脚本必须 login shell](feedback_跨机ssh必须login_shell.md) — ssh 远程起 python 一律 bash -lc / 显式 PATH,裸 ssh 起 non-interactive PATH 不含 brew,cliclick 找不到无声白跑(2026-05-05 NEO 5h 事故)
 - ❗ [Shadowrocket 按域名分流测出口](reference_shadowrocket_按域名分流测出口.md) — ipinfo 出口 ≠ 头条出口;判走代理用 TLS RTT 50-110ms 国内 / 1000ms+ 国外,别凭 ipinfo / route get(2026-05-02 阿良教训)
 - [罐头数据膨胀 ≈ 登录账号数](reference_罐头数据膨胀_账号数.md) — 罐头资源库占用主要来自每个登录账号的浏览器缓存,账号多则膨胀大,NEO2 73G/MINI 89G/NEO 96G(2026-05-09)
+- ❗ [罐头 CDP 嵌套结构 + 坐标链 + 故障基线探针](reference_罐头CDP嵌套结构与坐标链.md) — 罐头=1page+10webviews+2SW;真按钮在活跃 webview 内(757,487),屏幕(1547,593)需经罐头窗口/WEBVIEW容器/DPR三层投射;CDP WS 必 suppress_origin 绕 Chromium 117+ 403;_cdp_probe.py 抓正常态基线 4 份留底(新台机 5/18 4h 失败案立)
 - [罐头下载弹窗消除方案](reference_罐头下载弹窗消除方案.md) — Electron 强制弹"另存为"无法用 flag 关,组合 Page.setDownloadBehavior + Fetch.failRequest + requests 直拉绕过(2026-05-09)
 - ❗ [V1102.6 接续算法 bug 修法](reference_V1102.6接续算法bug修法.md) — V1102.5 接续被 if _wl_q 包住手动重启不生效;V1102.6 移出 + sub_rounds 动态(2026-05-09 NEO2 实证)
 - ❗ [中断恢复 catchup.py — 缺 N 补 N](project_catchup_中断恢复.md) — 三大件中断后 cd 件目录 → python3 catchup.py → go.command,3 步搞定;数据来源「待补漏」sheet 或 log;依赖 gtg_batch v1101.5+(2026-05-02)
