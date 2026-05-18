@@ -309,3 +309,45 @@ Why:
 
   hash 三连: 待 push 后补
 ============================================================
+
+
+============================================================
+十、V1103 hotfix 内嵌 (版本号不叠, 列入本文)
+============================================================
+
+【hotfix 2026-05-18 凌晨 阿良】 新台机 dpi_fix.py — Win 11 高 DPI 缩放跨机修复
+  - 新台机 KENCHOIWINMINI Win11 DPI=144 (150% 缩放), 鼠标坐标偏左上不命中按钮
+  - 修法: 新建 dpi_fix.py, 全 6 入口 import dpi_fix, 默认 no-op (DPI_FIX_ENABLE!=1)
+  - 部署: setx DPI_FIX_ENABLE 1 (永久) → 重启 Python 后 SCALE=1.5 monkey patch SetCursorPos
+  - 落地: 自动发布V1103/{微头条,文章自动,文章定时}V1103/{mac,win}/ + dpi_fix.py
+  - 详见: 故障说明_2026-05-18.txt 「已修」段
+
+【hotfix 2026-05-18 晚 绣虎】 zoom_ratio 写死 0.9 → 动态实测 pub_dpr/main_dpr
+  - V1102.8 推导时 (老台机 DPI=96) 这号 pub_dpr=1.125/main_dpr=1.25=0.9 写死 OK
+  - 新台机 DPI=144 后 pub_dpr=main_dpr=1.5 → zoom_ratio 应该 1.0 但写死 0.9 偏 76 像素
+  - 修法: 用 js() 实测 main_ws.devicePixelRatio + pub_ws.devicePixelRatio 动态算
+  - 落地: 仓库 V1103 win/微头条 + 文章自动 + 文章定时 (3 件) + 新台机桌面同步
+  - 老台机不动 (V1102.8 写死 0.9 在老台机仍成立)
+  - 详见: 故障说明_2026-05-18.txt + memory feedback_xxx
+
+【hotfix 2026-05-18 晚 绣虎】 文章定时 三窗时间 08:01/12:01/19:01 → 07:01/11:01/15:01
+  - 缺哥拍调整发文时间窗
+  - 修法: gtg_timer.py 6 处时间字符串 (注释 3 + 代码 3)
+  - 落地: 8 文件 (5 机桌面 + 仓库 V1103 win+mac) 全 py_compile OK
+  - 详见: commit 3125f3e
+
+【hotfix 2026-05-19 凌晨 绣虎】 check_system_notice selector indexOf 必须 !== -1
+  - win 端 [gtg_batch.py:1170] `if(t.indexOf("{channel_json}") === 0)` 太严
+  - conversation item innerText 拼接 `<unread_badge>\n<channel_name>\n<time>\n...`,
+    有未读消息时 unread badge (数字) 顶到 0 位 → indexOf=2 ≠ 0 → 漏挂
+  - 而"有未读 conversation" 正是要 click 进去读的, 漏挂等于漏读真处罚通知
+  - mac 端 V1102.9-mac-fix 早就改 !== -1, win 端漏同步
+  - 修法: win 端 selector `=== 0 → !== -1`, 跟 mac 同款
+  - 实证:
+      老台机 幸福圈     [01:06:45] ⚠ 系统通知 1 条 → 5/18 16:11 侵犯名誉投诉 ✓
+      老台机 青墨染流年 [01:08:56] ⚠ 审核通知 1 条 → 首发不符扣 5 分          ✓
+      air   暗夜行者之光 [01:20:55] ⚠ 系统通知 1 条 → 5/18 11:10 侵犯名誉投诉 ✓
+  - 落地: 老台机桌面 + 新台机桌面 + 仓库 V1103 win/gtg_batch.py (commit e54b18f)
+  - 仓库 V1103 mac 早已 !== -1 不动, 4 mac 桌面早已 !== -1 不动 (grep 实证)
+  - 立 memory: feedback_系统通知selector_indexOf严挂unread_badge.md
+  - 详见: 故障说明_2026-05-19.txt

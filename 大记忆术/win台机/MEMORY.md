@@ -2,6 +2,7 @@
 - ❗ [V1103 接续算法验证标志升级 — log YY ≡ 首篇 publish ZZ 双锁](feedback_接续算法验证标志升级.md) — V1102.6 实证只看 log 「从下一位 YY 起跑」漏了 sent_accounts_set 预注入跳过接续点的边界, 跑了 5 天伪生效;V1103 验证标志必须 YY ≡ ZZ 双锁(2026-05-16)
 - ❗ [V1103 quota 算法 — (素材+已发)//全员 整除, 余数留池, 无 cap, 缺 N 补 N](feedback_quota算法缺N补N全员分母.md) — 死规则:`_full_accounts_count` 全员分母, `sub_rounds=_quota_per` 动态, 白名单只优先排序不剔除, B 列 quota 忽略;cap 5/3 是历史臆造平台上限, V1103 全 5 机 3 件统一取消(2026-05-16)
 - ❗ [WIN MAC 不可跨推 — 5/14 错推 V1102.9 win 到 mac 大爆雷](feedback_WIN_MAC不可跨推.md) — WIN/MAC 是两条独立线(V1102.8 之后), 鼠标输入层+ACCOUNT_CLASS+ZOOM_FIX+collect 都不同;归档时 mac/ vs win/ 必分开源 + grep win32/cliclick 数实证(2026-05-14 错推 + 5/16 修齐)
+- ❗ [check_system_notice selector indexOf 必须 !== -1 不能 === 0 — unread badge 顶 0 位](feedback_系统通知selector_indexOf严挂unread_badge.md) — conversation tab innerText 拼接 `<badge>\n<channel>\n<time>\n<preview>`, 有未读时 badge 顶到 0 位; === 0 漏挂"有未读 conversation"(那正是要 click 的);mac V1102.9-mac-fix 早 !== -1, win 漏同步到 2026-05-19 才暴露; JS click 就 work 别折腾真鼠标(老台机/air 双频道实证)
 - ❗ [台机 collect_accounts B 方案 — 稳定换速度](feedback_collect_accounts_B方案_稳定优先.md) — same_count >= 4 容错 + 兜底 while 滚到底等 2s 直到 no_new_count >= 3;collect 时间 ~15s → ~40-60s 但保证 304 全收;不为快回退单条件 break(2026-05-16 18:53 漏 64 个账号实证)
 - ❗ [版本说明 / 故障说明 存放位置](feedback_版本说明故障说明存放位置.md) — 新版本说明放 自动发布/自动发布V<X>/V<X>版本说明.txt(跟版本号目录绑);故障说明 自动发布/故障说明/故障说明_YYYY-MM-DD.txt 当日独立 + 未修/已修分段;根 版本说明.txt 故障日志.txt 只留指针不再 append(2026-05-05 缺哥两纠)
 - ❗ [patch 完必清 .bak / 临时监听用完即删](feedback_patch完必清bak.md) — patch/clear/align 后必清 .bak+__pycache__+~$*;临时 hook/监听/cron/patch 脚本同款用完即拆,不囤积(2026-05-05)

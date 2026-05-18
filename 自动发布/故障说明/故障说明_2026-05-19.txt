@@ -1,0 +1,70 @@
+故障说明 2026-05-19
+====================
+
+## 已修
+
+### check_system_notice selector indexOf 太严, win 端漏挂有未读 conversation, 漏读真处罚 (绣虎 01:06-01:20)
+
+**背景:**
+缺哥早晨发现 air 5/18 微头条 漏读「爱走了心走了」5/18 7:49 真系统通知 (MCN 邀请 + "换血抗衰" 违规投诉), air 系统通知.txt = 0 字节. 之前 mini 5/16 系统通知.txt 9 条里 7 条是活动通知噪音, 一直没修.
+
+**反复排查路径 (绣虎犯几次错误):**
+1. 误判为 `notice_checked.txt` 过严 → 缺哥纠正"看 mini 5/16, 嫣倩 5/15 17:53 真系统通知不在 5/15 而在 5/16 — 是漏读延迟, 不是 notice_checked 问题"
+2. 误判为活动通知串到系统通知是 click 失败 → 改成真鼠标 win32api/cliclick → 缺哥纠正"原脚本审核通知能读到证明 JS click 工作, 不需要真鼠标"
+3. 真鼠标 patch 反而漏挂"系统通知" → log "未找到频道: 系统通知" 暴露真因 = selector `indexOf("...") === 0` 太严
+
+**根因 (最终锁定):**
+conversation item innerText 拼接结构:
+```
+[无未读] "系统通知\n05-18 16:11\n亲爱的创作者..."   → indexOf("系统通知") = 0 ✓
+[有未读] "1\n系统通知\n05-18 16:11\n亲爱的创作者..." → indexOf("系统通知") = 2 ✗
+```
+unread badge 数字顶到 0 位 → `=== 0` 漏挂 → 而"有未读的 conversation"正是需要 click 进去读的, 永远漏读真处罚.
+
+mac 端 V1102.9-mac-fix 早就发现并改了, 注释 `[v1102.9-mac-fix] indexOf===0 太严, unread badge 数字会顶到 0 位; 放宽 includes` + `!== -1` 实现. win 端漏同步直到今天暴露.
+
+**修法 (最小 1 行):**
+```python
+# OLD
+if(t.indexOf("{channel_json}") === 0)
+# NEW
+if(t.indexOf("{channel_json}") !== -1)
+```
+真鼠标 win32api / cliclick 那一坨 patch **全回滚** (over-engineer), 只剩 selector 单行 fix. 跟 mac V1102.9-mac-fix 同款.
+
+**现场实证 (老台机 + air 双机, 双频道):**
+```
+老台机 幸福圈     [01:06:45] ⚠ 系统通知 1 条 → 系统通知.txt
+                  "亲爱的创作者, 平台接到权利方对你发表的微头条《我有个哥们》侵犯名誉/商誉权的投诉后..."
+
+老台机 青墨染流年 [01:08:56] ⚠ 审核通知 1 条 → 审核通知.txt
+                  "首发内容审核通知...《杜特尔特家族要翻盘了》不符合首发条件, 扣 5 信用分"
+
+air   暗夜行者之光 [01:20:55] ⚠ 系统通知 1 条 → 系统通知.txt
+                  "亲爱的创作者, 平台接到权利方对你发表的微头条《突然发现毛骨悚然》侵犯名誉/商誉权的投诉后..."
+```
+全部命中, log 不再出现"未找到频道: 系统通知", 内容是真处罚不是活动通知.
+
+**落地:**
+- 老台机桌面 `微头条/gtg_batch.py` line 1170: `=== 0 → !== -1`
+- 新台机桌面 `微头条/gtg_batch.py` line 1170: `=== 0 → !== -1` (含 import dpi_fix + zoom 动态 patch 累积)
+- 仓库 `V1103/微头条V1103/win/gtg_batch.py`: 同, commit `e54b18f` 已 push origin/main
+- 仓库 `V1103/微头条V1103/mac/gtg_batch.py`: V1102.9-mac-fix 原版已 `!== -1`, 不动
+- 4 mac 桌面 `微头条/gtg_batch.py`: V1103 大统一时同 mac 版 `!== -1`, 不动 (grep 实证)
+- 版本号不叠, 内嵌 V1103 hotfix, 详见 V1103版本说明.txt 「十、hotfix」段
+
+**立 memory:**
+- feedback_系统通知selector_indexOf严挂unread_badge.md (本地 + 大记忆术/win台机/)
+
+**绣虎反思 (3 次方向错, 缺哥怒纠 3 次):**
+1. 第一反应 `notice_checked` 过严 — 没看清 5/16 嫣倩条数据, 推论错
+2. 加真鼠标 patch — 缺哥纠正 "审核通知能读证明 JS click 工作, 别折腾"
+3. 误判活动通知串入是 click 失败 — 缺哥纠正 "罐头平台把活动奖金分类到系统通知 conversation 里, 平台行为, 不是脚本误读"
+死规则复习: **先看 mac 端是否已修过类似 bug** (V1102.9-mac-fix 注释明确写了原因), 跟 mac 跨机对齐, 不重新发明.
+
+——绣虎 (Win 台机) 留 2026-05-19 01:30
+
+
+## 未修
+
+(无)
