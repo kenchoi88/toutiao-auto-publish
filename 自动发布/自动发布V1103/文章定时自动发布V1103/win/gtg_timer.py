@@ -17,9 +17,9 @@
   A4起 数据行：    A=账号名         B=发文数（1/2/3）
 
 自动排程规则（与 mini 一致）：
-  - 早窗 08:01 起：发文数≥1 的账号各 1 篇
-  - 中窗 12:01 起：发文数≥2 的账号各 1 篇
-  - 晚窗 19:01 起：发文数=3 的账号各 1 篇
+  - 早窗 07:01 起：发文数≥1 的账号各 1 篇
+  - 中窗 11:01 起：发文数≥2 的账号各 1 篇
+  - 晚窗 15:01 起：发文数=3 的账号各 1 篇
   - 间隔 1 分钟，按 Excel 顺序发；超时自然延后不截断
 """
 
@@ -220,9 +220,9 @@ def _expand_tasks(accounts_quota, date_str):
     GAP_MIN = 1
     windows = [
         # [v1102] 缺 N 篇 → 排前 N 个窗(剩 1=早 / 剩 2=早+中 / 剩 3=早+中+晚)
-        ("早", "08:01", [n for n, q in accounts_quota if q >= 1]),
-        ("中", "12:01", [n for n, q in accounts_quota if q >= 2]),
-        ("晚", "19:01", [n for n, q in accounts_quota if q >= 3]),
+        ("早", "07:01", [n for n, q in accounts_quota if q >= 1]),
+        ("中", "11:01", [n for n, q in accounts_quota if q >= 2]),
+        ("晚", "15:01", [n for n, q in accounts_quota if q >= 3]),
     ]
     tasks = []
     for label, start_str, names in windows:
